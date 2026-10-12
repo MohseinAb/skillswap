@@ -3,10 +3,10 @@ import { Text, View, TouchableOpacity, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Path } from 'react-native-svg';
-import { Feather } from '@expo/vector-icons'; // <-- Added Vector Icons
+import { Feather } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
 
-// Updated SVG: Y coordinates moved up slightly to avoid cards, X coordinate extended to 3000 for web width
+
 const BackgroundGraphic = () => (
   <View style={StyleSheet.absoluteFill}>
     <Svg height="100%" width="100%">

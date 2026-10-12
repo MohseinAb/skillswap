@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "skillswap-app",
+    "name": "SkillSwap",
     "slug": "skillswap-app",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,15 +10,19 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.skillswap.app",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#1B362A"
       }
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "5c13269e-83bc-4d75-8996-365a7efb87da"
+      }
     }
   }
 }
