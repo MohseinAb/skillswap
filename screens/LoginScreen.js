@@ -1,91 +1,130 @@
 import React, { useState } from 'react';
-import { Text, View, TextInput, TouchableOpacity, Alert } from 'react-native';
+import { Text, View, TextInput, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import Svg, { Path } from 'react-native-svg';
 import { COLORS, styles } from '../styles';
 
-// Firebase Imports
 import { auth, db } from '../firebaseConfig';
-import { signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
-
-const BackgroundGraphic = () => (
-  <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}>
-    <Svg height="100%" width="100%">
-      <Path d="M 0 160 L 120 160 L 140 180 L 3000 180" stroke="rgba(132, 220, 198, 0.15)" strokeWidth="1.5" fill="none" />
-    </Svg>
-  </View>
-);
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 export default function LoginScreen({ navigation }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const handleLogin = async () => {
-    if (!email || !password) {
-      Alert.alert("Error", "Please enter both email and password.");
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !password) {
+      Alert.alert('Missing Fields', 'Please enter your email and password.');
       return;
     }
 
+    setLoading(true);
     try {
-      // 1. Log the user in via Authentication
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const user = userCredential.user;
-      
-      // 2. Fetch their user document from Firestore to check their role
-      const docSnap = await getDoc(doc(db, "users", user.uid));
-      
-      if (docSnap.exists()) {
-        const userData = docSnap.data();
-        
-        // 3. Route them to the correct tab navigator based on role
-        if (userData.role === 'freelancer') {
-          navigation.navigate('FreelancerTabs');
+      let userCredential;
+      try {
+        userCredential = await signInWithEmailAndPassword(auth, cleanEmail, password);
+      } catch (signInErr) {
+        // Auto-provision the default Admin account on first login if using admin@skillswap.ph
+        if (cleanEmail === 'admin@skillswap.ph' && password === 'admin123') {
+          userCredential = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+          await setDoc(doc(db, 'users', userCredential.user.uid), {
+            fullName: 'System Administrator',
+            email: cleanEmail,
+            role: 'admin',
+            accountType: 'admin',
+            createdAt: serverTimestamp()
+          });
         } else {
-          navigation.navigate('ClientTabs');
+          throw signInErr;
         }
-      } else {
-        Alert.alert("Error", "User data not found in database.");
       }
-      
+
+      const uid = userCredential.user.uid;
+      const userDoc = await getDoc(doc(db, 'users', uid));
+      const userData = userDoc.exists() ? userDoc.data() : {};
+
+      if (userData.suspended) {
+        Alert.alert('Account Suspended', 'Your account has been suspended by an administrator.');
+        setLoading(false);
+        return;
+      }
+
+      const role = (userData.role || userData.accountType || '').toLowerCase();
+
+      if (role === 'admin' || cleanEmail === 'admin@skillswap.ph') {
+        navigation.replace('AdminDashboard');
+      } else if (role === 'freelancer') {
+        navigation.replace('FreelancerTabs');
+      } else {
+        navigation.replace('ClientTabs');
+      }
     } catch (error) {
-      console.error("Login Error:", error);
-      Alert.alert("Login Failed", "Invalid email or password.");
+      console.error('Login error:', error);
+      Alert.alert('Login Failed', 'Invalid email or password.');
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <LinearGradient colors={[COLORS.bgTop, COLORS.bgBottom]} style={styles.container}>
-      <BackgroundGraphic />
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.formContainer}>
-          <Text style={styles.subtitle}>Authenticate to continue</Text>
-          
-          <TextInput 
-            style={styles.input} 
-            placeholder="Email Address" 
-            placeholderTextColor={COLORS.textSecondary} 
+          <Text style={styles.headerText}>Welcome Back</Text>
+          <Text style={styles.subtitle}>Log in to your SkillSwap account</Text>
+
+          <Text style={styles.label}>Email Address</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="name@example.com"
+            placeholderTextColor={COLORS.textSecondary}
             autoCapitalize="none"
+            keyboardType="email-address"
             value={email}
             onChangeText={setEmail}
           />
-          <TextInput 
-            style={styles.input} 
-            placeholder="Password" 
-            placeholderTextColor={COLORS.textSecondary} 
-            secureTextEntry 
+
+          <Text style={styles.label}>Password</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="••••••••"
+            placeholderTextColor={COLORS.textSecondary}
+            secureTextEntry
             value={password}
             onChangeText={setPassword}
           />
-          <Text style={styles.forgotPassword}>Forgot Password?</Text>
 
-          <TouchableOpacity style={styles.primaryButton} onPress={handleLogin}>
-            <Text style={styles.primaryButtonText}>Log In</Text>
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={handleLogin}
+            disabled={loading}
+          >
+            {loading ? (
+              <ActivityIndicator color="#000" />
+            ) : (
+              <Text style={styles.primaryButtonText}>Log In</Text>
+            )}
           </TouchableOpacity>
-          
+
           <TouchableOpacity onPress={() => navigation.navigate('AccountType')}>
-            <Text style={styles.linkText}>New user? Create Account</Text>
+            <Text style={styles.linkText}>
+              Don't have an account? <Text style={{ color: COLORS.primary, fontWeight: 'bold' }}>Sign Up</Text>
+            </Text>
+          </TouchableOpacity>
+
+          {/* Quick Demo Admin Fill for Presentation */}
+          <TouchableOpacity
+            style={{ marginTop: 30, alignItems: 'center' }}
+            onPress={() => {
+              setEmail('admin@skillswap.ph');
+              setPassword('admin123');
+            }}
+          >
+            <Text style={{ color: COLORS.textSecondary, fontSize: 11 }}>
+              Admin Demo Login: <Text style={{ color: COLORS.primary }}>admin@skillswap.ph</Text> (Tap to Autofill)
+            </Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>

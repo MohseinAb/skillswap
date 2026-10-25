@@ -1,183 +1,497 @@
 import React, { useState, useEffect } from 'react';
-import { Text, View, TextInput, TouchableOpacity, ScrollView, Image, ActivityIndicator, Alert } from 'react-native';
+import { 
+  Text, View, TextInput, TouchableOpacity, ScrollView, 
+  ActivityIndicator, Alert, Modal, Image 
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Feather, Ionicons } from '@expo/vector-icons';
+import { Feather, FontAwesome } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
 
 import { auth, db } from '../firebaseConfig';
-import { collection, query, where, getDocs, doc, getDoc, addDoc, serverTimestamp } from 'firebase/firestore';
+import { 
+  collection, query, where, onSnapshot, addDoc, 
+  getDocs, doc, getDoc, serverTimestamp 
+} from 'firebase/firestore';
+
+const CATEGORIES = [
+  'All',
+  'Web Development',
+  'Mobile App Dev',
+  'Systems Arch',
+  'Graphic Design',
+  'UI/UX Design',
+  'Tutoring',
+  'Photography',
+  'Video Editing',
+  'General Services'
+];
+
+const LOCATIONS = [
+  'All',
+  'Uptown, Iligan City',
+  'Market Area, Iligan',
+  'Tibanga, Iligan',
+  'Poblacion, Iligan',
+  'Remote / Online'
+];
+
+const PRICE_FILTERS = [
+  { label: 'All Prices', value: 'ALL' },
+  { label: 'Under ₱500', value: 'UNDER_500' },
+  { label: '₱500 – ₱2,000', value: '500_2000' },
+  { label: 'Above ₱2,000', value: 'ABOVE_2000' },
+  { label: 'Price: Low to High', value: 'LOW_HIGH' },
+  { label: 'Price: High to Low', value: 'HIGH_LOW' }
+];
 
 export default function SearchScreen({ navigation }) {
-  const [freelancers, setFreelancers] = useState([]);
+  const [listings, setListings] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Fetch all freelancers for the search feed
+  // Search & Filter states
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [selectedLocation, setSelectedLocation] = useState('All');
+  const [selectedPrice, setSelectedPrice] = useState(PRICE_FILTERS[0]);
+
+  // Modal visibility states
+  const [activeFilterModal, setActiveFilterModal] = useState(null);
+  const [bookingLoadingId, setBookingLoadingId] = useState(null);
+
   useEffect(() => {
-    const fetchFreelancers = async () => {
-      try {
-        const q = query(collection(db, "users"), where("role", "==", "freelancer"));
-        const querySnapshot = await getDocs(q);
-        
-        const freelancerList = [];
-        querySnapshot.forEach((doc) => {
-          freelancerList.push({ id: doc.id, ...doc.data() });
-        });
-        
-        setFreelancers(freelancerList);
-      } catch (error) {
-        console.error("Error fetching freelancers:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
+    let servicesData = [];
+    let freelancersMap = {};
 
-    fetchFreelancers();
-  }, []);
+    const qUsers = query(collection(db, 'users'));
+    const unsubUsers = onSnapshot(qUsers, (userSnap) => {
+      const usersList = [];
+      freelancersMap = {};
 
-  // Handle the Booking & Chat creation process
-  const handleBookService = async (freelancer) => {
-    try {
-      const currentUserId = auth.currentUser.uid;
-
-      // 1. Get the Client's name from the database
-      const userDoc = await getDoc(doc(db, "users", currentUserId));
-      const clientName = userDoc.exists() ? userDoc.data().fullName : "Client";
-      const projectName = freelancer.primarySkill || "Service Request";
-
-      // 2. Create the Booking Document (Shows up on Freelancer Home Screen)
-      await addDoc(collection(db, "bookings"), {
-        clientId: currentUserId,
-        clientName: clientName,
-        freelancerId: freelancer.id,
-        freelancerName: freelancer.fullName,
-        title: projectName,
-        status: "pending", // Starts as pending for the freelancer to accept
-        price: 0, // Placeholder price
-        createdAt: serverTimestamp()
-      });
-
-      // 3. Check if a chat already exists between these two users
-      const chatQuery = query(collection(db, "chats"), where("participants", "array-contains", currentUserId));
-      const chatSnap = await getDocs(chatQuery);
-      
-      let existingChatId = null;
-      chatSnap.forEach((doc) => {
-        if (doc.data().participants.includes(freelancer.id)) {
-          existingChatId = doc.id;
+      userSnap.forEach((docSnap) => {
+        const data = docSnap.data();
+        const role = (data.role || data.accountType || '').toLowerCase();
+        if (role === 'freelancer') {
+          freelancersMap[docSnap.id] = { id: docSnap.id, ...data };
+          usersList.push({ id: docSnap.id, ...data });
         }
       });
 
-      // 4. If no chat exists, create a new one
-      if (!existingChatId) {
-        const chatRef = await addDoc(collection(db, "chats"), {
-          participants: [currentUserId, freelancer.id],
-          clientName: clientName,
-          freelancerName: freelancer.fullName,
-          projectName: projectName,
-          lastMessage: "I would like to book your service.",
-          updatedAt: serverTimestamp()
-        });
-        
-        existingChatId = chatRef.id;
+      mergeAndSetListings(servicesData, usersList, freelancersMap);
+    });
 
-        // Send the automatic first message inside the chat
-        await addDoc(collection(db, "chats", existingChatId, "messages"), {
-          text: "I would like to book your service.",
-          senderId: currentUserId,
-          createdAt: serverTimestamp()
-        });
-      }
-
-      // 5. Navigate the client straight into the chat room
-      navigation.navigate('Chat', { 
-        chatId: existingChatId, 
-        otherUserName: freelancer.fullName 
+    const qServices = query(collection(db, 'services'));
+    const unsubServices = onSnapshot(qServices, (serviceSnap) => {
+      servicesData = [];
+      serviceSnap.forEach((docSnap) => {
+        const sData = docSnap.data();
+        if (sData.visible !== false) {
+          servicesData.push({ id: docSnap.id, ...sData });
+        }
       });
 
+      const usersList = Object.values(freelancersMap);
+      mergeAndSetListings(servicesData, usersList, freelancersMap);
+      setLoading(false);
+    });
+
+    return () => {
+      unsubUsers();
+      unsubServices();
+    };
+  }, []);
+
+  const mergeAndSetListings = (servicesData, usersList, freelancersMap) => {
+    const combined = [];
+    const freelancersWithServices = new Set();
+
+    servicesData.forEach((service) => {
+      const owner = freelancersMap[service.freelancerId] || {};
+      freelancersWithServices.add(service.freelancerId);
+
+      combined.push({
+        id: service.id,
+        serviceId: service.id,
+        freelancerId: service.freelancerId,
+        freelancerName: service.freelancerName || owner.fullName || owner.name || 'Freelancer',
+        title: service.title || 'Freelance Service',
+        category: service.category || owner.category || 'General Services',
+        location: service.location || owner.location || owner.address || 'Iligan City',
+        price: parseFloat(service.price || owner.rate || owner.price || 500),
+        rateType: service.rateType || owner.rateType || 'hr',
+        rating: owner.rating || service.rating || 5.0,
+        reviewCount: owner.reviewCount || 0,
+        avatar: owner.profileImage || owner.avatar || null,
+        description: service.description || owner.bio || ''
+      });
+    });
+
+    usersList.forEach((user) => {
+      if (!freelancersWithServices.has(user.id)) {
+        combined.push({
+          id: `user_${user.id}`,
+          serviceId: null,
+          freelancerId: user.id,
+          freelancerName: user.fullName || user.name || user.email?.split('@')[0] || 'Freelancer',
+          title: user.serviceTitle || user.skills || user.category || 'Freelancer',
+          category: user.category || user.skills || 'General Services',
+          location: user.location || user.address || 'Iligan City',
+          price: parseFloat(user.rate || user.price || 350),
+          rateType: user.rateType || 'hr',
+          rating: user.rating || 5.0,
+          reviewCount: user.reviewCount || 0,
+          avatar: user.profileImage || user.avatar || null,
+          description: user.bio || ''
+        });
+      }
+    });
+
+    setListings(combined);
+    setLoading(false);
+  };
+
+  const getFilteredListings = () => {
+    let result = listings.filter((item) => {
+      if (auth.currentUser && item.freelancerId === auth.currentUser.uid) return false;
+
+      const q = searchQuery.toLowerCase().trim();
+      const matchesSearch =
+        !q ||
+        item.freelancerName.toLowerCase().includes(q) ||
+        item.title.toLowerCase().includes(q) ||
+        item.category.toLowerCase().includes(q) ||
+        item.location.toLowerCase().includes(q);
+
+      const matchesCategory =
+        selectedCategory === 'All' ||
+        item.category.toLowerCase().includes(selectedCategory.toLowerCase()) ||
+        item.title.toLowerCase().includes(selectedCategory.toLowerCase());
+
+      const matchesLocation =
+        selectedLocation === 'All' ||
+        item.location.toLowerCase().includes(selectedLocation.split(',')[0].toLowerCase());
+
+      let matchesPrice = true;
+      if (selectedPrice.value === 'UNDER_500') matchesPrice = item.price < 500;
+      else if (selectedPrice.value === '500_2000') matchesPrice = item.price >= 500 && item.price <= 2000;
+      else if (selectedPrice.value === 'ABOVE_2000') matchesPrice = item.price > 2000;
+
+      return matchesSearch && matchesCategory && matchesLocation && matchesPrice;
+    });
+
+    if (selectedPrice.value === 'LOW_HIGH') {
+      result.sort((a, b) => a.price - b.price);
+    } else if (selectedPrice.value === 'HIGH_LOW') {
+      result.sort((a, b) => b.price - a.price);
+    }
+
+    return result;
+  };
+
+  const handleBookService = async (item) => {
+    if (!auth.currentUser) {
+      Alert.alert('Login Required', 'Please log in to book a service.');
+      return;
+    }
+
+    setBookingLoadingId(item.id);
+    try {
+      const clientDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
+      const clientData = clientDoc.exists() ? clientDoc.data() : {};
+      const clientName = clientData.fullName || clientData.name || auth.currentUser.email.split('@')[0];
+
+      await addDoc(collection(db, 'bookings'), {
+        clientId: auth.currentUser.uid,
+        clientName: clientName,
+        freelancerId: item.freelancerId,
+        freelancerName: item.freelancerName,
+        serviceId: item.serviceId || item.id,
+        serviceTitle: item.title,
+        projectTitle: item.title,
+        category: item.category,
+        price: item.price,
+        rateType: item.rateType,
+        location: item.location,
+        status: 'pending',
+        progress: 0,
+        latestNote: 'Booking request sent. Waiting for freelancer confirmation.',
+        progressNotes: [],
+        createdAt: serverTimestamp()
+      });
+
+      const qChats = query(
+        collection(db, 'chats'),
+        where('participants', 'array-contains', auth.currentUser.uid)
+      );
+      const chatSnap = await getDocs(qChats);
+      let existingChatId = null;
+
+      chatSnap.forEach((cDoc) => {
+        const cData = cDoc.data();
+        if (cData.participants && cData.participants.includes(item.freelancerId)) {
+          existingChatId = cDoc.id;
+        }
+      });
+
+      const initialMsg = `Hi ${item.freelancerName}! I just booked your "${item.title}" service.`;
+
+      if (!existingChatId) {
+        const newChatRef = await addDoc(collection(db, 'chats'), {
+          participants: [auth.currentUser.uid, item.freelancerId],
+          clientId: auth.currentUser.uid,
+          clientName: clientName,
+          freelancerId: item.freelancerId,
+          freelancerName: item.freelancerName,
+          projectTitle: item.title,
+          lastMessage: initialMsg,
+          updatedAt: serverTimestamp()
+        });
+        existingChatId = newChatRef.id;
+      }
+
+      await addDoc(collection(db, 'chats', existingChatId, 'messages'), {
+        text: initialMsg,
+        senderId: auth.currentUser.uid,
+        createdAt: serverTimestamp()
+      });
+
+      Alert.alert(
+        'Service Booked!',
+        `Your booking request for "${item.title}" with ${item.freelancerName} has been sent.`,
+        [
+          { text: 'View Bookings', onPress: () => navigation.navigate('Bookings') },
+          { 
+            text: 'Message Freelancer', 
+            onPress: () => navigation.navigate('Chat', { chatId: existingChatId, otherUserName: item.freelancerName }) 
+          }
+        ]
+      );
     } catch (error) {
-      console.error("Booking Error:", error);
-      Alert.alert("Error", "Could not process booking. Please try again.");
+      console.error('Error booking service:', error);
+      Alert.alert('Error', 'Could not complete booking. Please try again.');
+    } finally {
+      setBookingLoadingId(null);
     }
   };
 
+  const filteredListings = getFilteredListings();
+
   return (
     <LinearGradient colors={[COLORS.bgTop, COLORS.bgBottom]} style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
         
+        {/* Top Centered Brand Header */}
         <View style={styles.searchHeaderRow}>
-          <Text style={[styles.logoText, { marginBottom: 0, fontSize: 16 }]}>SKILLSWAP</Text>
-          <View style={styles.searchProfileIcon}>
+          <Text style={{ color: COLORS.text, fontSize: 16, fontWeight: 'bold', letterSpacing: 2 }}>
+            SKILLSWAP
+          </Text>
+          <TouchableOpacity 
+            style={styles.searchProfileIcon}
+            onPress={() => navigation.navigate('Profile')}
+          >
             <Feather name="user" size={18} color={COLORS.primary} />
-          </View>
+          </TouchableOpacity>
         </View>
 
+        {/* Search Input Bar */}
         <View style={styles.searchContainer}>
           <Feather name="search" size={18} color={COLORS.textSecondary} />
-          <TextInput 
-            style={styles.searchInput} 
-            placeholder="Search Freelancers or Skills..." 
-            placeholderTextColor={COLORS.textSecondary} 
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search Freelancers or Skills..."
+            placeholderTextColor={COLORS.textSecondary}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
           />
-        </View>
-
-        <View style={styles.filterRow}>
-          {['Category', 'Location', 'Price'].map((filter, index) => (
-            <TouchableOpacity key={index} style={styles.filterPill}>
-              <Text style={styles.filterText}>{filter}</Text>
-              <Feather name="chevron-down" size={12} color={COLORS.textSecondary} />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity onPress={() => setSearchQuery('')}>
+              <Feather name="x" size={16} color={COLORS.textSecondary} />
             </TouchableOpacity>
-          ))}
+          )}
         </View>
 
+        {/* 3 Filter Pills */}
+        <View style={styles.filterRow}>
+          <TouchableOpacity 
+            style={[styles.filterPill, selectedCategory !== 'All' && { borderColor: COLORS.primary }]}
+            onPress={() => setActiveFilterModal('category')}
+          >
+            <Text style={[styles.filterText, selectedCategory !== 'All' && { color: COLORS.primary }]} numberOfLines={1}>
+              {selectedCategory === 'All' ? 'Category' : selectedCategory}
+            </Text>
+            <Feather name="chevron-down" size={12} color={selectedCategory !== 'All' ? COLORS.primary : COLORS.textSecondary} />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.filterPill, selectedLocation !== 'All' && { borderColor: COLORS.primary }]}
+            onPress={() => setActiveFilterModal('location')}
+          >
+            <Text style={[styles.filterText, selectedLocation !== 'All' && { color: COLORS.primary }]} numberOfLines={1}>
+              {selectedLocation === 'All' ? 'Location' : selectedLocation.split(',')[0]}
+            </Text>
+            <Feather name="chevron-down" size={12} color={selectedLocation !== 'All' ? COLORS.primary : COLORS.textSecondary} />
+          </TouchableOpacity>
+
+          <TouchableOpacity 
+            style={[styles.filterPill, selectedPrice.value !== 'ALL' && { borderColor: COLORS.primary }]}
+            onPress={() => setActiveFilterModal('price')}
+          >
+            <Text style={[styles.filterText, selectedPrice.value !== 'ALL' && { color: COLORS.primary }]} numberOfLines={1}>
+              {selectedPrice.value === 'ALL' ? 'Price' : selectedPrice.label}
+            </Text>
+            <Feather name="chevron-down" size={12} color={selectedPrice.value !== 'ALL' ? COLORS.primary : COLORS.textSecondary} />
+          </TouchableOpacity>
+        </View>
+
+        {/* Freelancer / Service Cards List */}
         {loading ? (
           <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 50 }} />
         ) : (
-          <ScrollView showsVerticalScrollIndicator={false}>
-            {freelancers.map((freelancer) => (
-              <View key={freelancer.id} style={styles.freelancerCard}>
-                <View style={styles.fcTopRow}>
-                  <View style={styles.fcLeftInfo}>
-                    {freelancer.idImage ? (
-                      <Image source={{ uri: `data:image/jpeg;base64,${freelancer.idImage}` }} style={styles.fcAvatar} />
-                    ) : (
-                      <View style={styles.fcAvatar}><Feather name="user" size={20} color={COLORS.textSecondary} /></View>
-                    )}
-                    
-                    <View style={styles.fcNameRole}>
-                      <Text style={styles.fcName}>{freelancer.fullName}</Text>
-                      <Text style={styles.fcRole}>{freelancer.primarySkill || 'SkillSwap Freelancer'}</Text>
-                      <View style={styles.fcLocationRow}>
-                        <Ionicons name="location-outline" size={12} color={COLORS.primary} />
-                        <Text style={styles.fcLocationText}>{freelancer.city || 'Unknown Location'}</Text>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
+            {filteredListings.length > 0 ? (
+              filteredListings.map((item) => (
+                <View key={item.id} style={styles.freelancerCard}>
+                  
+                  {/* Tapping the Freelancer's Profile/Name opens their Categorized Portfolio */}
+                  <TouchableOpacity 
+                    style={styles.fcTopRow}
+                    activeOpacity={0.75}
+                    onPress={() => navigation.navigate('FreelancerPortfolio', { 
+                      freelancerId: item.freelancerId, 
+                      freelancerName: item.freelancerName 
+                    })}
+                  >
+                    <View style={styles.fcLeftInfo}>
+                      <View style={[styles.fcAvatar, { borderWidth: 1, borderColor: COLORS.primary }]}>
+                        {item.avatar ? (
+                          <Image source={{ uri: item.avatar }} style={{ width: 45, height: 45, borderRadius: 22.5 }} />
+                        ) : (
+                          <Feather name="user" size={22} color={COLORS.primary} />
+                        )}
+                      </View>
+                      <View style={styles.fcNameRole}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          <Text style={[styles.fcName, { textDecorationLine: 'underline' }]}>
+                            {item.freelancerName}
+                          </Text>
+                          <Feather name="external-link" size={12} color={COLORS.primary} style={{ marginLeft: 6 }} />
+                        </View>
+                        <Text style={styles.fcRole}>{item.title} • {item.category}</Text>
+                        <View style={styles.fcLocationRow}>
+                          <Feather name="map-pin" size={10} color={COLORS.primary} />
+                          <Text style={styles.fcLocationText}>{item.location}</Text>
+                        </View>
+                        <Text style={{ color: COLORS.primary, fontSize: 10, marginTop: 4 }}>
+                          Tap profile to view portfolio & services →
+                        </Text>
                       </View>
                     </View>
-                  </View>
 
-                  <View style={styles.fcRightInfo}>
-                    <View style={styles.fcRatingRow}>
-                      <Ionicons name="star" size={14} color={COLORS.primary} />
-                      <Text style={styles.fcRatingText}>5.0</Text>
+                    <View style={styles.fcRightInfo}>
+                      <View style={styles.fcRatingRow}>
+                        <FontAwesome name="star" size={14} color={COLORS.primary} />
+                        <Text style={styles.fcRatingText}>
+                          {Number(item.rating || 5.0).toFixed(1)}
+                        </Text>
+                      </View>
+                      <Text style={styles.fcPrice}>
+                        ₱{item.price}/{item.rateType?.toLowerCase() === 'project' ? 'project' : 'hr'}
+                      </Text>
                     </View>
-                    <Text style={styles.fcPrice}>₱0/hr</Text>
-                  </View>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity 
+                    style={styles.bookBtn}
+                    onPress={() => handleBookService(item)}
+                    disabled={bookingLoadingId === item.id}
+                  >
+                    {bookingLoadingId === item.id ? (
+                      <ActivityIndicator color="#000" size="small" />
+                    ) : (
+                      <Text style={styles.bookBtnText}>Book Service</Text>
+                    )}
+                  </TouchableOpacity>
                 </View>
-                
-                {/* Book Service Button */}
+              ))
+            ) : (
+              <View style={{ alignItems: 'center', marginTop: 60 }}>
+                <Feather name="search" size={40} color={COLORS.inputBorder} style={{ marginBottom: 12 }} />
+                <Text style={styles.subtitle}>No matching freelancers or services found.</Text>
                 <TouchableOpacity 
-                  style={styles.bookBtn} 
-                  onPress={() => handleBookService(freelancer)}
+                  onPress={() => {
+                    setSearchQuery('');
+                    setSelectedCategory('All');
+                    setSelectedLocation('All');
+                    setSelectedPrice(PRICE_FILTERS[0]);
+                  }}
                 >
-                  <Text style={styles.bookBtnText}>Book Service</Text>
+                  <Text style={{ color: COLORS.primary, fontSize: 13, fontWeight: 'bold' }}>Reset All Filters</Text>
                 </TouchableOpacity>
               </View>
-            ))}
-            
-            {freelancers.length === 0 && (
-              <Text style={[styles.subtitle, { marginTop: 40 }]}>No freelancers found in your area.</Text>
             )}
           </ScrollView>
         )}
+
+        {/* Filter Selection Modal */}
+        <Modal visible={activeFilterModal !== null} transparent animationType="fade">
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'center', padding: 25 }}>
+            <View style={{ backgroundColor: COLORS.cardInactiveBg, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: COLORS.inputBorder }}>
+              
+              {activeFilterModal === 'category' && (
+                <>
+                  <Text style={{ color: COLORS.text, fontWeight: 'bold', fontSize: 16, marginBottom: 15 }}>Filter by Category</Text>
+                  {CATEGORIES.map((cat) => (
+                    <TouchableOpacity
+                      key={cat}
+                      style={{ paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: COLORS.inputBorder, flexDirection: 'row', justifyContent: 'space-between' }}
+                      onPress={() => { setSelectedCategory(cat); setActiveFilterModal(null); }}
+                    >
+                      <Text style={{ color: selectedCategory === cat ? COLORS.primary : COLORS.text, fontSize: 14 }}>{cat}</Text>
+                      {selectedCategory === cat && <Feather name="check" size={16} color={COLORS.primary} />}
+                    </TouchableOpacity>
+                  ))}
+                </>
+              )}
+
+              {activeFilterModal === 'location' && (
+                <>
+                  <Text style={{ color: COLORS.text, fontWeight: 'bold', fontSize: 16, marginBottom: 15 }}>Filter by Location</Text>
+                  {LOCATIONS.map((loc) => (
+                    <TouchableOpacity
+                      key={loc}
+                      style={{ paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: COLORS.inputBorder, flexDirection: 'row', justifyContent: 'space-between' }}
+                      onPress={() => { setSelectedLocation(loc); setActiveFilterModal(null); }}
+                    >
+                      <Text style={{ color: selectedLocation === loc ? COLORS.primary : COLORS.text, fontSize: 14 }}>{loc}</Text>
+                      {selectedLocation === loc && <Feather name="check" size={16} color={COLORS.primary} />}
+                    </TouchableOpacity>
+                  ))}
+                </>
+              )}
+
+              {activeFilterModal === 'price' && (
+                <>
+                  <Text style={{ color: COLORS.text, fontWeight: 'bold', fontSize: 16, marginBottom: 15 }}>Filter by Price</Text>
+                  {PRICE_FILTERS.map((p) => (
+                    <TouchableOpacity
+                      key={p.value}
+                      style={{ paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: COLORS.inputBorder, flexDirection: 'row', justifyContent: 'space-between' }}
+                      onPress={() => { setSelectedPrice(p); setActiveFilterModal(null); }}
+                    >
+                      <Text style={{ color: selectedPrice.value === p.value ? COLORS.primary : COLORS.text, fontSize: 14 }}>{p.label}</Text>
+                      {selectedPrice.value === p.value && <Feather name="check" size={16} color={COLORS.primary} />}
+                    </TouchableOpacity>
+                  ))}
+                </>
+              )}
+
+              <TouchableOpacity style={{ marginTop: 15, alignItems: 'center' }} onPress={() => setActiveFilterModal(null)}>
+                <Text style={{ color: COLORS.textSecondary }}>Close</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
     </LinearGradient>
   );
