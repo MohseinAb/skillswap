@@ -1,0 +1,22 @@
+{
+  "name": "skillswap-payments-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Creates Xendit invoices and confirms payments for SkillSwap bookings.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.11"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^12.1.0"
+  }
+}
