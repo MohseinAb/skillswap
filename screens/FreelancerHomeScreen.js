@@ -4,6 +4,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import { notify, confirmAction } from '../services/notify';
+import { isNegotiated, getBookingStage, stageLabel, payoutSummary } from '../services/paymentRules';
+import { ensureBookingChat } from '../services/bookingFlow';
 
 import { auth, db } from '../firebaseConfig';
 import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -16,13 +19,9 @@ export default function FreelancerHomeScreen({ navigation }) {
   useEffect(() => {
     if (!auth.currentUser) return;
 
-    const fetchUser = async () => {
-      const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
-      if (userDoc.exists()) {
-        setUserData(userDoc.data());
-      }
-    };
-    fetchUser();
+    const unsubUser = onSnapshot(doc(db, 'users', auth.currentUser.uid), (snap) => {
+      if (snap.exists()) setUserData(snap.data());
+    });
 
     const q = query(
       collection(db, 'bookings'),
@@ -38,7 +37,10 @@ export default function FreelancerHomeScreen({ navigation }) {
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubUser();
+      unsubscribe();
+    };
   }, []);
 
   const pendingRequests = bookings.filter(b => (b.status || 'pending').toLowerCase() === 'pending');
@@ -47,40 +49,42 @@ export default function FreelancerHomeScreen({ navigation }) {
   );
   const completedProjects = bookings.filter(b => (b.status || '').toLowerCase() === 'completed');
 
-  const totalEarnings = completedProjects.reduce((sum, b) => sum + (parseFloat(b.price) || 0), 0);
-  const pendingEscrow = activeProjects.reduce((sum, b) => sum + (parseFloat(b.price) || 0), 0);
+  // Bookings made with the offer flow count what the client actually paid (updated by the payments
+  // server). Older bookings have no payment data, so they keep using their price.
+  const paidOrPrice = (b) => (isNegotiated(b) ? parseFloat(b.amountPaid) || 0 : parseFloat(b.price) || 0);
+  const totalEarnings = completedProjects.reduce((sum, b) => sum + paidOrPrice(b), 0);
+  const pendingEscrow = activeProjects.reduce((sum, b) => sum + paidOrPrice(b), 0);
 
-  const handleAcceptProject = async (req) => {
+  // Requests are no longer accepted in one tap. Open the booking's chat, agree on the details,
+  // then send a custom offer (Create offer button in the chat).
+  const handleOpenRequestChat = async (req) => {
     try {
-      await updateDoc(doc(db, 'bookings', req.id), {
-        status: 'active',
-        progress: req.progress || 0,
-        latestNote: 'Project accepted! Work has begun.',
-        updatedAt: serverTimestamp()
-      });
+      const chatId = await ensureBookingChat(req);
+      navigation.navigate('Chat', { chatId, otherUserName: req.clientName || 'Client' });
     } catch (error) {
-      Alert.alert('Error', 'Could not accept project.');
+      notify('Could not open the chat', 'Please try again in a moment.');
     }
   };
 
+  const requestActionLabel = (req) => {
+    const stage = getBookingStage(req);
+    if (stage === 'offer_sent') return 'Edit offer in chat';
+    if (stage === 'awaiting_downpayment') return 'Open chat';
+    return 'Chat and send offer';
+  };
+
   const handleDeclineProject = async (reqId) => {
-    Alert.alert('Decline Booking', 'Are you sure you want to decline this project request?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Decline',
-        style: 'destructive',
-        onPress: async () => {
-          try {
-            await updateDoc(doc(db, 'bookings', reqId), {
-              status: 'declined',
-              updatedAt: serverTimestamp()
-            });
-          } catch (error) {
-            console.error('Error declining project:', error);
-          }
-        }
-      }
-    ]);
+    const ok = await confirmAction('Decline booking', 'Are you sure you want to decline this project request?', 'Decline', true);
+    if (!ok) return;
+    try {
+      await updateDoc(doc(db, 'bookings', reqId), {
+        status: 'declined',
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      console.error('Error declining project:', error);
+      notify('Error', 'Could not decline the booking. Please try again.');
+    }
   };
 
   const displayName = userData?.fullName || userData?.name || auth.currentUser?.email?.split('@')[0] || 'Freelancer';
@@ -140,6 +144,23 @@ export default function FreelancerHomeScreen({ navigation }) {
         ) : (
           <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 100 }}>
             
+            {userData && !isAdmin && !payoutSummary(userData.paymentMethod) && (
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.warningDim, borderColor: COLORS.warningLine, borderWidth: 1, borderRadius: 16, padding: 14, marginBottom: 16 }}
+                onPress={() => navigation.navigate('Profile')}
+                activeOpacity={0.85}
+              >
+                <Feather name="alert-circle" size={18} color={COLORS.warning} style={{ marginRight: 12 }} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: COLORS.text, fontSize: 14, fontWeight: '700' }}>Set up your payout method</Text>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 12, marginTop: 2 }}>
+                    You need one before you can send offers and get paid.
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={18} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+            )}
+
             {/* Modern Glow Earnings Card */}
             <View style={styles.earningsCard}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -156,7 +177,7 @@ export default function FreelancerHomeScreen({ navigation }) {
               <View style={{ backgroundColor: 'rgba(0,0,0,0.1)', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, marginTop: 20, flexDirection: 'row', alignItems: 'center' }}>
                 <Feather name="clock" size={14} color="#000" style={{ marginRight: 8 }} />
                 <Text style={{ color: '#000', fontSize: 13, fontWeight: '600' }}>
-                  Pending Escrow: ₱ {pendingEscrow.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  Pending: ₱ {pendingEscrow.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </Text>
               </View>
             </View>
@@ -180,6 +201,9 @@ export default function FreelancerHomeScreen({ navigation }) {
                         <Text style={{ color: COLORS.textSecondary, fontSize: 13, marginTop: 2 }} numberOfLines={1}>
                           {req.serviceTitle || req.projectTitle || req.category || 'Service Booking'}
                         </Text>
+                        <Text style={{ color: COLORS.warning, fontSize: 12, fontWeight: '700', marginTop: 4 }}>
+                          {stageLabel(getBookingStage(req), 'freelancer')}
+                        </Text>
                       </View>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
@@ -197,9 +221,9 @@ export default function FreelancerHomeScreen({ navigation }) {
                     </TouchableOpacity>
                     <TouchableOpacity 
                       style={[styles.btnPrimary, styles.btnHalf]}
-                      onPress={() => handleAcceptProject(req)}
+                      onPress={() => handleOpenRequestChat(req)}
                     >
-                      <Text style={styles.btnPrimaryText}>Accept Project</Text>
+                      <Text style={styles.btnPrimaryText}>{requestActionLabel(req)}</Text>
                     </TouchableOpacity>
                   </View>
                 </View>

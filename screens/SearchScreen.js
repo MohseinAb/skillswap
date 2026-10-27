@@ -7,6 +7,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather, FontAwesome } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import { startNegotiation } from '../services/bookingFlow';
+import { notify } from '../services/notify';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -188,87 +190,30 @@ export default function SearchScreen({ navigation }) {
     return result;
   };
 
+  // Booking now opens a chat: the client and freelancer agree on scope and price there,
+  // then the freelancer sends a custom offer (see services/bookingFlow.js).
   const handleBookService = async (item) => {
     if (!auth.currentUser) {
-      Alert.alert('Login Required', 'Please log in to book a service.');
+      notify('Login required', 'Please log in to book a service.');
       return;
     }
 
     setBookingLoadingId(item.id);
     try {
-      const clientDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
-      const clientData = clientDoc.exists() ? clientDoc.data() : {};
-      const clientName = clientData.fullName || clientData.name || auth.currentUser.email.split('@')[0];
-
-      await addDoc(collection(db, 'bookings'), {
-        clientId: auth.currentUser.uid,
-        clientName: clientName,
-        freelancerId: item.freelancerId,
-        freelancerName: item.freelancerName,
+      const { chatId } = await startNegotiation({
         serviceId: item.serviceId || item.id,
         serviceTitle: item.title,
-        projectTitle: item.title,
         category: item.category,
         price: item.price,
         rateType: item.rateType,
         location: item.location,
-        status: 'pending',
-        progress: 0,
-        latestNote: 'Booking request sent. Waiting for freelancer confirmation.',
-        progressNotes: [],
-        createdAt: serverTimestamp()
+        freelancerId: item.freelancerId,
+        freelancerName: item.freelancerName,
       });
-
-      const qChats = query(
-        collection(db, 'chats'),
-        where('participants', 'array-contains', auth.currentUser.uid)
-      );
-      const chatSnap = await getDocs(qChats);
-      let existingChatId = null;
-
-      chatSnap.forEach((cDoc) => {
-        const cData = cDoc.data();
-        if (cData.participants && cData.participants.includes(item.freelancerId)) {
-          existingChatId = cDoc.id;
-        }
-      });
-
-      const initialMsg = `Hi ${item.freelancerName}! I just booked your "${item.title}" service.`;
-
-      if (!existingChatId) {
-        const newChatRef = await addDoc(collection(db, 'chats'), {
-          participants: [auth.currentUser.uid, item.freelancerId],
-          clientId: auth.currentUser.uid,
-          clientName: clientName,
-          freelancerId: item.freelancerId,
-          freelancerName: item.freelancerName,
-          projectTitle: item.title,
-          lastMessage: initialMsg,
-          updatedAt: serverTimestamp()
-        });
-        existingChatId = newChatRef.id;
-      }
-
-      await addDoc(collection(db, 'chats', existingChatId, 'messages'), {
-        text: initialMsg,
-        senderId: auth.currentUser.uid,
-        createdAt: serverTimestamp()
-      });
-
-      Alert.alert(
-        'Service Booked!',
-        `Your booking request for "${item.title}" with ${item.freelancerName} has been sent.`,
-        [
-          { text: 'View Bookings', onPress: () => navigation.navigate('Bookings') },
-          { 
-            text: 'Message Freelancer', 
-            onPress: () => navigation.navigate('Chat', { chatId: existingChatId, otherUserName: item.freelancerName }) 
-          }
-        ]
-      );
+      navigation.navigate('Chat', { chatId, otherUserName: item.freelancerName });
     } catch (error) {
       console.error('Error booking service:', error);
-      Alert.alert('Error', 'Could not complete booking. Please try again.');
+      notify('Could not start the booking', error.message || 'Please try again.');
     } finally {
       setBookingLoadingId(null);
     }
@@ -408,7 +353,7 @@ export default function SearchScreen({ navigation }) {
                     {bookingLoadingId === item.id ? (
                       <ActivityIndicator color="#000" size="small" />
                     ) : (
-                      <Text style={styles.bookBtnText}>Book Service</Text>
+                      <Text style={styles.bookBtnText}>Book now and chat</Text>
                     )}
                   </TouchableOpacity>
                 </View>

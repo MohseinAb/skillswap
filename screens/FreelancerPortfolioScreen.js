@@ -7,6 +7,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather, FontAwesome } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import { startNegotiation } from '../services/bookingFlow';
+import { notify } from '../services/notify';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -130,48 +132,29 @@ export default function FreelancerPortfolioScreen({ route, navigation }) {
     }
   };
 
+  // Booking now opens a chat so the scope and price can be agreed before anyone commits.
   const handleBookSpecificService = async (service) => {
     if (!auth.currentUser) {
-      Alert.alert('Login Required', 'Please log in to book this service.');
+      notify('Login required', 'Please log in to book this service.');
       return;
     }
 
     setBookingServiceId(service.id);
     try {
-      const clientDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
-      const clientData = clientDoc.exists() ? clientDoc.data() : {};
-      const clientName = clientData.fullName || clientData.name || auth.currentUser.email.split('@')[0];
       const fName = freelancer?.fullName || freelancer?.name || freelancerName || 'Freelancer';
-
-      await addDoc(collection(db, 'bookings'), {
-        clientId: auth.currentUser.uid,
-        clientName: clientName,
-        freelancerId: freelancerId,
-        freelancerName: fName,
+      const { chatId } = await startNegotiation({
         serviceId: service.id,
         serviceTitle: service.title,
-        projectTitle: service.title,
         category: service.category || 'General',
         price: parseFloat(service.price || 0),
         rateType: service.rateType || 'Hour',
         location: freelancer?.location || freelancer?.address || 'Iligan City',
-        status: 'pending',
-        progress: 0,
-        latestNote: 'Booking requested from Freelancer Portfolio.',
-        progressNotes: [],
-        createdAt: serverTimestamp()
+        freelancerId,
+        freelancerName: fName,
       });
-
-      Alert.alert(
-        'Service Booked!',
-        `Your request for "${service.title}" has been sent to ${fName}.`,
-        [
-          { text: 'Stay Here', style: 'cancel' },
-          { text: 'Go to My Bookings', onPress: () => navigation.navigate('ClientTabs', { screen: 'Bookings' }) }
-        ]
-      );
+      navigation.navigate('Chat', { chatId, otherUserName: fName });
     } catch (error) {
-      Alert.alert('Error', 'Could not complete booking.');
+      notify('Could not start the booking', error.message || 'Please try again.');
     } finally {
       setBookingServiceId(null);
     }
@@ -448,7 +431,7 @@ export default function FreelancerPortfolioScreen({ route, navigation }) {
                       {bookingServiceId === service.id ? (
                         <ActivityIndicator color="#000" size="small" />
                       ) : (
-                        <Text style={styles.bookBtnText}>Book "{service.title}"</Text>
+                        <Text style={styles.bookBtnText}>Book now and chat</Text>
                       )}
                     </TouchableOpacity>
                   )}

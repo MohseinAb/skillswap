@@ -415,3 +415,14 @@ test('a payment that arrives during a dispute is recorded without changing the d
   assert.equal(b.amountPaid, 5000);
   assert.equal(b.deliveryStatus, 'unlocked');
 });
+
+test('without a public address no redirect urls are sent to Xendit', async () => {
+  const db = new FakeDb();
+  const x = makeXendit();
+  seed(db);
+  const inv = await createOrReuseInvoice({ db, xendit: x, config: { ...config, publicBaseUrl: '' }, bookingId: 'b1', type: 'downpayment', user: client });
+  const sent = x.invoices.get(inv.invoiceId)._payload;
+  assert.equal('success_redirect_url' in sent, false);
+  assert.equal('failure_redirect_url' in sent, false);
+  assert.equal(sent.amount, 2500);
+});

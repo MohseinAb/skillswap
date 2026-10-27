@@ -8,6 +8,13 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { COLORS, styles } from '../styles';
+import OfferModal from '../components/OfferModal';
+import OfferSummary from '../components/OfferSummary';
+import { notify, confirmAction } from '../services/notify';
+import {
+  isNegotiated, getBookingStage, stageLabel, normalizeUrl, peso, payoutSummary, PAYMENT_CONFIG,
+} from '../services/paymentRules';
+import { ensureBookingChat, submitFinalWork, getDelivery } from '../services/bookingFlow';
 
 import { auth, db } from '../firebaseConfig';
 import { doc, getDoc, onSnapshot, updateDoc, arrayUnion, serverTimestamp } from 'firebase/firestore';
@@ -31,6 +38,12 @@ export default function BookingProgressScreen({ route, navigation }) {
   // Fullscreen Image Viewer State
   const [previewImageUri, setPreviewImageUri] = useState(null);
 
+  // Offer & final delivery
+  const [offerModalVisible, setOfferModalVisible] = useState(false);
+  const [finalUrl, setFinalUrl] = useState('');
+  const [finalNote, setFinalNote] = useState('');
+  const [submittingFinal, setSubmittingFinal] = useState(false);
+
   useEffect(() => {
     if (auth.currentUser) {
       getDoc(doc(db, 'users', auth.currentUser.uid)).then((snap) => {
@@ -48,9 +61,27 @@ export default function BookingProgressScreen({ route, navigation }) {
     return () => unsub();
   }, [bookingId]);
 
+  // Live profile, so a payout method saved in Profile is picked up when you come back here.
+  useEffect(() => {
+    if (!auth.currentUser) return undefined;
+    return onSnapshot(doc(db, 'users', auth.currentUser.uid), (snap) => {
+      if (snap.exists()) setCurrentUserData(snap.data());
+    });
+  }, []);
+
+  // Once the final link is submitted, show it again in the form so it can be replaced.
+  useEffect(() => {
+    if (booking?.deliveryStatus === 'submitted' && !finalUrl) {
+      getDelivery(bookingId).then((d) => { if (d?.url) setFinalUrl(d.url); }).catch(() => {});
+    }
+  }, [booking?.deliveryStatus]);
+
   const isAdmin = 
     (currentUserData?.role || currentUserData?.accountType || '').toLowerCase() === 'admin' ||
     auth.currentUser?.email?.toLowerCase() === 'admin@skillswap.ph';
+
+  const negotiated = isNegotiated(booking);
+  const stage = getBookingStage(booking);
 
   const handlePickProgressPhoto = async () => {
     try {
@@ -75,10 +106,13 @@ export default function BookingProgressScreen({ route, navigation }) {
 
   const handleSaveUpdate = async (markCompleted = false) => {
     const finalProgress = markCompleted ? 100 : progress;
-    const finalStatus = markCompleted || finalProgress === 100 
-      ? 'completed' 
-      : booking.status === 'disputed' 
-      ? 'disputed' 
+    // Negotiated bookings are completed by the client's final payment, never by the freelancer.
+    const finalStatus = negotiated
+      ? booking.status || 'active'
+      : markCompleted || finalProgress === 100
+      ? 'completed'
+      : booking.status === 'disputed'
+      ? 'disputed'
       : 'active';
     const noteText = note.trim() || (markCompleted ? 'Project completed!' : `Updated progress to ${finalProgress}%`);
 
@@ -105,14 +139,62 @@ export default function BookingProgressScreen({ route, navigation }) {
       setAttachmentLink('');
       setAttachmentImage(null);
 
-      Alert.alert(
-        finalStatus === 'completed' ? 'Project Completed!' : 'Progress Updated',
-        `Updated to ${finalProgress}%.`
-      );
+      notify(finalStatus === 'completed' ? 'Project completed!' : 'Progress updated', `Updated to ${finalProgress}%.`);
     } catch (error) {
-      Alert.alert('Error', 'Failed to update progress.');
+      notify('Error', 'Failed to update progress.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleOpenChat = async () => {
+    try {
+      const chatId = await ensureBookingChat(booking);
+      navigation.navigate('Chat', { chatId, otherUserName: booking.clientName || 'Client' });
+    } catch (error) {
+      notify('Could not open the chat', 'Please try again in a moment.');
+    }
+  };
+
+  const handleOpenOffer = () => {
+    if (PAYMENT_CONFIG.REQUIRE_PAYOUT_METHOD && !payoutSummary(currentUserData?.paymentMethod)) {
+      notify(
+        'Set up your payout method first',
+        'Add a GCash, Maya or bank account under Profile, then Payout Method, so SkillSwap knows where to send your earnings.'
+      );
+      navigation.navigate('FreelancerTabs', { screen: 'Profile' });
+      return;
+    }
+    setOfferModalVisible(true);
+  };
+
+  const handleSubmitFinal = async () => {
+    const link = normalizeUrl(finalUrl);
+    if (!link.ok) {
+      notify('Check the link', link.error);
+      return;
+    }
+    const replacing = booking.deliveryStatus === 'submitted';
+    if (!replacing) {
+      const ok = await confirmAction(
+        'Submit your final work?',
+        `This sets progress to 100%. ${booking.clientName || 'The client'} will see that your work is ready, but the link stays locked until they pay the remaining ${peso(booking.offer?.remainingBalance)}.`,
+        'Submit final work'
+      );
+      if (!ok) return;
+    }
+    setSubmittingFinal(true);
+    try {
+      await submitFinalWork(booking, link, finalNote, currentUserData?.fullName || currentUserData?.name);
+      setFinalNote('');
+      notify(
+        replacing ? 'Link updated' : 'Final work submitted',
+        `The link stays hidden until the client pays the remaining ${peso(booking.offer?.remainingBalance)}.`
+      );
+    } catch (error) {
+      notify('Could not submit the final work', error.message || 'Please try again.');
+    } finally {
+      setSubmittingFinal(false);
     }
   };
 
@@ -159,6 +241,12 @@ export default function BookingProgressScreen({ route, navigation }) {
     );
   }
 
+  // Negotiated bookings only show progress controls while the project is active (offer accepted, downpayment paid)
+  // and before the final work is submitted. After that, the Final delivery section takes over.
+  const showControls =
+    !negotiated ||
+    (['active', 'accepted', 'disputed'].includes((booking.status || '').toLowerCase()) && stage !== 'delivered_locked');
+  const milestones = negotiated ? MILESTONES.filter((v) => v < 100) : MILESTONES;
   const isDisputed = (booking.status || '').toLowerCase() === 'disputed' || booking.disputeStatus === 'open' || (booking.disputeMessages && booking.disputeMessages.length > 0);
 
   return (
@@ -190,7 +278,7 @@ export default function BookingProgressScreen({ route, navigation }) {
               </View>
               <View style={[styles.statusPill, { borderColor: isDisputed ? '#FF4C4C' : COLORS.primary }]}>
                 <Text style={[styles.statusText, { color: isDisputed ? '#FF4C4C' : COLORS.primary }]}>
-                  {(booking.status || 'ACTIVE').toUpperCase()}
+                  {negotiated ? stageLabel(stage, 'freelancer').toUpperCase() : (booking.status || 'ACTIVE').toUpperCase()}
                 </Text>
               </View>
             </View>
@@ -202,6 +290,47 @@ export default function BookingProgressScreen({ route, navigation }) {
               <Text style={{ color: COLORS.primary, fontWeight: 'bold', fontSize: 13 }}>{progress}%</Text>
             </View>
           </View>
+
+          {/* ============================================================== */}
+          {/* OFFER & PAYMENT (bookings made with the new flow)               */}
+          {/* ============================================================== */}
+          {negotiated && (
+            <>
+              <Text style={styles.sectionTitle}>OFFER & PAYMENT</Text>
+
+              {booking.offer ? (
+                <OfferSummary booking={booking} viewer="freelancer" />
+              ) : (
+                <View style={[styles.infoCard, { marginBottom: 12 }]}>
+                  <Text style={{ color: COLORS.text, fontSize: 15, fontWeight: '700', marginBottom: 6 }}>No offer sent yet</Text>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 19 }}>
+                    Agree on the scope and price with {booking.clientName || 'the client'} in chat, then send a custom offer
+                    with the final price and an optional downpayment.
+                  </Text>
+                </View>
+              )}
+
+              {!isAdmin && (stage === 'negotiating' || stage === 'offer_sent') && (
+                <View style={{ flexDirection: 'row', marginBottom: 14 }}>
+                  <TouchableOpacity style={[styles.btnHalf, styles.btnDark]} onPress={handleOpenChat}>
+                    <Text style={styles.btnDarkText}>Open chat</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.btnHalf, styles.btnPrimary]} onPress={handleOpenOffer}>
+                    <Text style={styles.btnPrimaryText}>{booking.offer ? 'Edit offer' : 'Create custom offer'}</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {stage === 'awaiting_downpayment' && (
+                <View style={[styles.infoCard, { marginBottom: 14 }]}>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 19 }}>
+                    The client accepted your offer. Work starts as soon as they pay the {peso(booking.offer?.downpaymentAmount)} downpayment,
+                    and you will see it in the chat.
+                  </Text>
+                </View>
+              )}
+            </>
+          )}
 
           {/* ============================================================== */}
           {/* 3-WAY DISPUTE GROUP CHAT (CLIENT + FREELANCER + ADMIN)         */}
@@ -300,10 +429,12 @@ export default function BookingProgressScreen({ route, navigation }) {
             </View>
           )}
 
+          {showControls && (
+          <>
           {/* Select Progress Percentage */}
           <Text style={styles.sectionTitle}>SET PROGRESS PERCENTAGE</Text>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20 }}>
-            {MILESTONES.map((val) => (
+            {milestones.map((val) => (
               <TouchableOpacity
                 key={val}
                 onPress={() => setProgress(val)}
@@ -394,7 +525,7 @@ export default function BookingProgressScreen({ route, navigation }) {
             )}
           </TouchableOpacity>
 
-          {booking.status !== 'completed' && (
+          {!negotiated && booking.status !== 'completed' && (
             <TouchableOpacity
               style={[styles.logoutBtn, { borderColor: COLORS.primary, marginTop: 12 }]}
               onPress={() => handleSaveUpdate(true)}
@@ -403,6 +534,65 @@ export default function BookingProgressScreen({ route, navigation }) {
               <Feather name="check-circle" size={18} color={COLORS.primary} />
               <Text style={[styles.logoutText, { color: COLORS.primary }]}>Mark Project as Completed (100%)</Text>
             </TouchableOpacity>
+          )}
+
+          </>
+          )}
+
+          {/* Final delivery: the link stays locked until the client pays the remaining balance */}
+          {negotiated && !isAdmin && ['in_progress', 'delivered_locked', 'completed'].includes(stage) && (
+            <>
+              <Text style={[styles.sectionTitle, { marginTop: 25 }]}>FINAL DELIVERY</Text>
+              {stage === 'completed' ? (
+                <View style={[styles.infoCard, { borderColor: COLORS.primaryLine }]}>
+                  <Text style={{ color: COLORS.text, fontSize: 15, fontWeight: '700', marginBottom: 4 }}>Delivered and paid</Text>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 19 }}>
+                    The client paid in full, and {peso(booking.amountPaid)} counts toward your earnings.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.infoCard}>
+                  <Text style={{ color: COLORS.text, fontSize: 15, fontWeight: '700', marginBottom: 6 }}>
+                    {stage === 'delivered_locked' ? 'Waiting for the client to pay' : 'Submit your final work'}
+                  </Text>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 19, marginBottom: 14 }}>
+                    {stage === 'delivered_locked'
+                      ? `Your link is saved and hidden. The client unlocks it by paying ${peso(booking.offer?.remainingBalance)}. You can replace the link until then.`
+                      : `Paste a link to your finished work (Google Drive, Figma, GitHub...). The client only sees it after paying the remaining ${peso(booking.offer?.remainingBalance)}.`}
+                  </Text>
+                  <TextInput
+                    style={styles.input}
+                    placeholder="https://drive.google.com/..."
+                    placeholderTextColor={COLORS.placeholder}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    value={finalUrl}
+                    onChangeText={setFinalUrl}
+                  />
+                  <TextInput
+                    style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
+                    placeholder="Optional note for the client (how to open the files, what is included...)"
+                    placeholderTextColor={COLORS.placeholder}
+                    multiline
+                    value={finalNote}
+                    onChangeText={setFinalNote}
+                  />
+                  <TouchableOpacity
+                    style={[styles.primaryButton, { marginTop: 0 }, submittingFinal && { opacity: 0.7 }]}
+                    onPress={handleSubmitFinal}
+                    disabled={submittingFinal}
+                  >
+                    {submittingFinal ? (
+                      <ActivityIndicator color={COLORS.onPrimary} />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>
+                        {stage === 'delivered_locked' ? 'Replace submitted link' : 'Submit final work'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+            </>
           )}
 
           {/* Notes History Log */}
@@ -521,6 +711,13 @@ export default function BookingProgressScreen({ route, navigation }) {
             )}
           </View>
         </Modal>
+
+        <OfferModal
+          visible={offerModalVisible}
+          booking={booking}
+          senderName={currentUserData?.fullName || currentUserData?.name || 'The freelancer'}
+          onClose={() => setOfferModalVisible(false)}
+        />
 
       </SafeAreaView>
     </LinearGradient>

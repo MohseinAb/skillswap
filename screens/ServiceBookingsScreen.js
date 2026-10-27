@@ -8,6 +8,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { COLORS, styles } from '../styles';
+import { notify, confirmAction } from '../services/notify';
+import { getBookingStage, stageLabel } from '../services/paymentRules';
+import { ensureBookingChat } from '../services/bookingFlow';
 
 import { auth, db } from '../firebaseConfig';
 import { collection, query, where, onSnapshot, doc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -101,37 +104,35 @@ export default function ServiceBookingsScreen({ route, navigation }) {
   const activeBookings = filteredBookings.filter(b => ['active', 'accepted', 'disputed'].includes((b.status || '').toLowerCase()) || b.disputeStatus === 'open');
   const completedBookings = filteredBookings.filter(b => (b.status || '').toLowerCase() === 'completed');
 
-  const handleAccept = async (booking) => {
+  // Requests are no longer accepted in one tap. Open the booking's chat, agree on the details,
+  // then send a custom offer (Create offer button in the chat).
+  const handleOpenRequest = async (booking) => {
     try {
-      await updateDoc(doc(db, 'bookings', booking.id), {
-        status: 'active',
-        serviceId: liveService.id,
-        serviceTitle: liveService.title,
-        price: booking.price || liveService.price || 0,
-        progress: booking.progress || 0,
-        latestNote: 'Booking accepted by freelancer. Project started!',
-        updatedAt: serverTimestamp()
-      });
-      Alert.alert('Accepted!', 'Booking moved to Active Bookings. Tap it to update progress and notes.');
+      const chatId = await ensureBookingChat(booking);
+      navigation.navigate('Chat', { chatId, otherUserName: booking.clientName || 'Client' });
     } catch (error) {
-      Alert.alert('Error', 'Could not accept booking.');
+      notify('Could not open the chat', 'Please try again in a moment.');
     }
   };
 
+  const requestActionLabel = (req) => {
+    const stage = getBookingStage(req);
+    if (stage === 'offer_sent') return 'Edit offer in chat';
+    if (stage === 'awaiting_downpayment') return 'Open chat';
+    return 'Chat and send offer';
+  };
+
   const handleDecline = async (bookingId) => {
-    Alert.alert('Decline Request', 'Are you sure you want to decline this booking request?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Decline',
-        style: 'destructive',
-        onPress: async () => {
-          await updateDoc(doc(db, 'bookings', bookingId), {
-            status: 'declined',
-            updatedAt: serverTimestamp()
-          });
-        }
-      }
-    ]);
+    const ok = await confirmAction('Decline request', 'Are you sure you want to decline this booking request?', 'Decline', true);
+    if (!ok) return;
+    try {
+      await updateDoc(doc(db, 'bookings', bookingId), {
+        status: 'declined',
+        updatedAt: serverTimestamp()
+      });
+    } catch (error) {
+      notify('Error', 'Could not decline the booking. Please try again.');
+    }
   };
 
   return (
@@ -208,6 +209,9 @@ export default function ServiceBookingsScreen({ route, navigation }) {
                         <Text style={styles.requestProjectTitle}>
                           {req.serviceTitle || req.projectTitle || liveService.title}
                         </Text>
+                        <Text style={{ color: COLORS.warning, fontSize: 12, fontWeight: '700', marginTop: 4 }}>
+                          {stageLabel(getBookingStage(req), 'freelancer')}
+                        </Text>
                       </View>
                     </View>
                     <View style={styles.requestPriceRight}>
@@ -220,8 +224,8 @@ export default function ServiceBookingsScreen({ route, navigation }) {
                     <TouchableOpacity style={styles.declineBtn} onPress={() => handleDecline(req.id)}>
                       <Text style={styles.declineBtnText}>Decline</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.acceptBtn} onPress={() => handleAccept(req)}>
-                      <Text style={styles.acceptBtnText}>Accept Project</Text>
+                    <TouchableOpacity style={styles.acceptBtn} onPress={() => handleOpenRequest(req)}>
+                      <Text style={styles.acceptBtnText}>{requestActionLabel(req)}</Text>
                     </TouchableOpacity>
                   </View>
                 </View>

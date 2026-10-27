@@ -7,6 +7,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import OfferModal from '../components/OfferModal';
+import { getBookingStage, peso, payoutSummary, PAYMENT_CONFIG } from '../services/paymentRules';
+import { notify } from '../services/notify';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -21,6 +24,8 @@ export default function ChatScreen({ route, navigation }) {
   const [currentUserData, setCurrentUserData] = useState(null);
   const [chatData, setChatData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [booking, setBooking] = useState(null);
+  const [offerModalVisible, setOfferModalVisible] = useState(false);
   const scrollViewRef = useRef();
 
   useEffect(() => {
@@ -63,6 +68,27 @@ export default function ChatScreen({ route, navigation }) {
     };
   }, [chatId]);
 
+  // Live profile, so a payout method saved in Profile is picked up when you come back here.
+  useEffect(() => {
+    if (!auth.currentUser) return undefined;
+    return onSnapshot(doc(db, 'users', auth.currentUser.uid), (snap) => {
+      if (snap.exists()) setCurrentUserData(snap.data());
+    });
+  }, []);
+
+  // Each booking has its own chat. Follow that booking so offers and payments show up live.
+  useEffect(() => {
+    if (!chatData?.bookingId) {
+      setBooking(null);
+      return undefined;
+    }
+    return onSnapshot(
+      doc(db, 'bookings', chatData.bookingId),
+      (snap) => setBooking(snap.exists() ? { id: snap.id, ...snap.data() } : null),
+      () => setBooking(null)
+    );
+  }, [chatData?.bookingId]);
+
   const isAdmin = 
     (currentUserData?.role || currentUserData?.accountType || '').toLowerCase() === 'admin' ||
     auth.currentUser?.email?.toLowerCase() === 'admin@skillswap.ph';
@@ -103,6 +129,65 @@ export default function ChatScreen({ route, navigation }) {
     (auth.currentUser?.uid === chatData?.clientId ? chatData?.freelancerName : chatData?.clientName) || 
     'User';
 
+  // --- Booking context: negotiation, offers and payments ---
+  const isFreelancerSide = !!booking && auth.currentUser?.uid === booking.freelancerId;
+  const stage = getBookingStage(booking);
+
+  const openBookingDetails = () => {
+    if (!booking) {
+      navigation.goBack();
+      return;
+    }
+    navigation.navigate(isFreelancerSide ? 'BookingProgress' : 'ClientBookingDetail', { bookingId: booking.id });
+  };
+
+  const handleCreateOffer = () => {
+    if (PAYMENT_CONFIG.REQUIRE_PAYOUT_METHOD && !payoutSummary(currentUserData?.paymentMethod)) {
+      notify(
+        'Set up your payout method first',
+        'Add a GCash, Maya or bank account under Profile, then Payout Method, so SkillSwap knows where to send your earnings.'
+      );
+      navigation.navigate('FreelancerTabs', { screen: 'Profile' });
+      return;
+    }
+    setOfferModalVisible(true);
+  };
+
+  const banner = (() => {
+    if (!booking) return null;
+    const total = booking.offer?.totalPrice;
+    const down = booking.offer?.downpaymentAmount;
+    const view = { action: 'View booking', onPress: openBookingDetails };
+    switch (stage) {
+      case 'negotiating':
+      case 'legacy_pending':
+        return isFreelancerSide
+          ? { text: 'Agree on the details here, then send a custom offer.', action: 'Create offer', onPress: handleCreateOffer }
+          : { text: 'Agree on the details here. The freelancer will send a custom offer.', ...view };
+      case 'offer_sent':
+        return isFreelancerSide
+          ? { text: `Offer sent for ${peso(total)}. Waiting for the client.`, action: 'Edit offer', onPress: handleCreateOffer }
+          : { text: `New offer for ${peso(total)}. Review it and accept the terms.`, action: 'Review offer', onPress: openBookingDetails };
+      case 'awaiting_downpayment':
+        return isFreelancerSide
+          ? { text: `Offer accepted. Work starts when the ${peso(down)} downpayment is paid.`, ...view }
+          : { text: `Offer accepted. Pay the ${peso(down)} downpayment to start the project.`, action: 'Pay downpayment', onPress: openBookingDetails };
+      case 'delivered_locked':
+        return isFreelancerSide
+          ? { text: 'Final work submitted. It unlocks when the client pays the balance.', ...view }
+          : { text: 'The final work is ready. Pay the remaining balance to unlock it.', action: 'Pay and unlock', onPress: openBookingDetails };
+      case 'completed':
+        return { text: 'Project completed and paid.', ...view };
+      case 'disputed':
+        return { text: 'A dispute is open. Payments are paused.', ...view };
+      case 'declined':
+      case 'cancelled':
+        return { text: `This booking was ${stage}.`, action: null };
+      default:
+        return { text: 'Project in progress.', ...view };
+    }
+  })();
+
   return (
     <LinearGradient colors={[COLORS.bgTop, COLORS.bgBottom]} style={styles.container}>
       <SafeAreaView style={{ flex: 1 }} edges={['top', 'left', 'right', 'bottom']}>
@@ -141,10 +226,43 @@ export default function ChatScreen({ route, navigation }) {
               </View>
             </View>
 
-            <TouchableOpacity style={styles.detailsBtn} onPress={() => navigation.goBack()}>
+            <TouchableOpacity style={styles.detailsBtn} onPress={openBookingDetails}>
               <Text style={styles.detailsBtnText}>Details</Text>
             </TouchableOpacity>
           </View>
+
+          {/* Booking banner: where this deal stands and what to do next */}
+          {booking && banner ? (
+            <View
+              style={{
+                marginHorizontal: 20,
+                marginTop: 12,
+                flexDirection: 'row',
+                alignItems: 'center',
+                backgroundColor: COLORS.primaryDim,
+                borderColor: COLORS.primaryLine,
+                borderWidth: 1,
+                borderRadius: 16,
+                paddingVertical: 10,
+                paddingHorizontal: 14,
+              }}
+            >
+              <View style={{ flex: 1, paddingRight: 10 }}>
+                <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: '700' }} numberOfLines={1}>
+                  {booking.serviceTitle || 'Booking'}
+                </Text>
+                <Text style={{ color: COLORS.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 2 }}>{banner.text}</Text>
+              </View>
+              {banner.action ? (
+                <TouchableOpacity
+                  onPress={banner.onPress}
+                  style={{ backgroundColor: COLORS.primary, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 14 }}
+                >
+                  <Text style={{ color: COLORS.onPrimary, fontSize: 12, fontWeight: '800' }}>{banner.action}</Text>
+                </TouchableOpacity>
+              ) : null}
+            </View>
+          ) : null}
 
           {/* Messages Scroll Area */}
           {loading ? (
@@ -164,6 +282,25 @@ export default function ChatScreen({ route, navigation }) {
               </View>
 
               {messages.map((msg) => {
+                if (msg.type === 'system') {
+                  return (
+                    <View key={msg.id} style={{ alignItems: 'center', marginBottom: 16 }}>
+                      <View
+                        style={{
+                          backgroundColor: COLORS.primaryDim,
+                          borderColor: COLORS.primaryLine,
+                          borderWidth: 1,
+                          borderRadius: 14,
+                          paddingVertical: 8,
+                          paddingHorizontal: 14,
+                          maxWidth: '90%',
+                        }}
+                      >
+                        <Text style={{ color: COLORS.text, fontSize: 12, lineHeight: 18, textAlign: 'center' }}>{msg.text}</Text>
+                      </View>
+                    </View>
+                  );
+                }
                 const isSent = msg.senderId === auth.currentUser?.uid;
                 const isMsgAdmin = msg.senderRole === 'ADMIN' || (msg.text && msg.text.startsWith('[ADMIN]'));
                 const cleanMsgText = msg.text ? msg.text.replace(/^\[ADMIN\]\s*/i, '') : '';
@@ -231,6 +368,13 @@ export default function ChatScreen({ route, navigation }) {
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
+
+        <OfferModal
+          visible={offerModalVisible}
+          booking={booking}
+          senderName={currentUserData?.fullName || currentUserData?.name || 'The freelancer'}
+          onClose={() => setOfferModalVisible(false)}
+        />
       </SafeAreaView>
     </LinearGradient>
   );

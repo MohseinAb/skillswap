@@ -78,6 +78,9 @@ export default function MessagesScreen({ navigation }) {
                     {/* 3. Display the freelancer's name instead of just "User" */}
                     <Text style={styles.msgName}>{msg.freelancerName || "Freelancer"}</Text>
                     <Text style={styles.msgPreview} numberOfLines={1}>{msg.lastMessage || "No messages yet."}</Text>
+                    {msg.projectTitle ? (
+                      <Text style={[styles.msgRole, { marginLeft: 0, marginTop: 4 }]} numberOfLines={1}>Project: {msg.projectTitle}</Text>
+                    ) : null}
                   </View>
                 </TouchableOpacity>
               ))

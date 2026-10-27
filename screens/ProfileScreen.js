@@ -8,6 +8,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { COLORS, styles } from '../styles';
+import { notify } from '../services/notify';
+import { validatePayoutForm, payoutSummary } from '../services/paymentRules';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -100,6 +102,7 @@ export default function ProfileScreen({ navigation }) {
 
   const role = (userData?.role || userData?.accountType || '').toLowerCase();
   const isFreelancer = role === 'freelancer';
+  const payoutLine = payoutSummary(userData?.paymentMethod);
   const isAdmin = role === 'admin' || auth.currentUser?.email?.toLowerCase() === 'admin@skillswap.ph';
   const selectedService = services.find((s) => s.id === selectedServiceId) || services[0];
 
@@ -167,23 +170,36 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
-  // --- NEW: Save Upgraded Payment Details ---
+  // --- Save payout details (validated, GCash/Maya numbers are normalised to 09XXXXXXXXX) ---
   const handleSavePayment = async () => {
     if (!auth.currentUser) return;
+    const check = validatePayoutForm({
+      type: paymentType,
+      name: paymentName,
+      number: paymentNumber,
+      bankName: paymentBankName,
+    });
+    if (!check.ok) {
+      notify('Check your payout details', check.error);
+      return;
+    }
     try {
       await updateDoc(doc(db, 'users', auth.currentUser.uid), {
-        paymentMethod: { 
-          type: paymentType, 
-          name: paymentName.trim(), 
-          number: paymentNumber.trim(),
-          bankName: paymentType === 'Bank Transfer' ? paymentBankName.trim() : null,
-          qrCode: paymentQR
+        paymentMethod: {
+          type: paymentType,
+          name: check.name,
+          number: check.number,
+          bankName: check.bankName,
+          qrCode: paymentQR,
+          updatedAt: new Date().toISOString()
         }
       });
+      setPaymentName(check.name);
+      setPaymentNumber(check.number);
       setShowPaymentModal(false);
-      Alert.alert('Success', 'Payout details saved successfully!');
+      notify('Payout method saved', 'SkillSwap will send your earnings here once a project is completed and paid.');
     } catch (error) {
-      Alert.alert('Error', 'Failed to save payment details.');
+      notify('Error', 'Failed to save payment details.');
     }
   };
 
@@ -373,10 +389,20 @@ export default function ProfileScreen({ navigation }) {
               </TouchableOpacity>
             )}
             
-            <TouchableOpacity style={styles.listItem} onPress={() => setShowPaymentModal(true)}>
-              <View style={styles.listLeft}><Feather name="credit-card" size={18} color={COLORS.primary} /><Text style={styles.listText}>Payment Methods</Text></View>
-              <Feather name="chevron-right" size={18} color={COLORS.textSecondary} />
-            </TouchableOpacity>
+            {isFreelancer && (
+              <TouchableOpacity style={styles.listItem} onPress={() => setShowPaymentModal(true)}>
+                <View style={styles.listLeft}>
+                  <Feather name="credit-card" size={18} color={COLORS.primary} />
+                  <View>
+                    <Text style={styles.listText}>Payment Methods</Text>
+                    <Text style={[styles.listText, { fontSize: 12, fontWeight: '500', marginTop: 2, color: payoutLine ? COLORS.textSecondary : COLORS.warning }]}>
+                      {payoutLine || 'Not set. Add one to send offers and get paid.'}
+                    </Text>
+                  </View>
+                </View>
+                <Feather name="chevron-right" size={18} color={COLORS.textSecondary} />
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity style={styles.listItem} onPress={() => setPasswordModalVisible(true)}>
               <View style={styles.listLeft}><Feather name="lock" size={18} color={COLORS.primary} /><Text style={styles.listText}>Security & Password</Text></View>
@@ -456,6 +482,9 @@ export default function ProfileScreen({ navigation }) {
               </View>
               
               <ScrollView showsVerticalScrollIndicator={false}>
+                <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 19, marginBottom: 16 }}>
+                  This is where SkillSwap sends your earnings once a project is completed and paid.
+                </Text>
                 <Text style={styles.label}>Select Payout Type</Text>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 20 }}>
                   {['GCash', 'Maya', 'Bank Transfer'].map((type) => (

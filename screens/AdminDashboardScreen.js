@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import { isNegotiated } from '../services/paymentRules';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -70,8 +71,10 @@ export default function AdminDashboardScreen({ navigation }) {
   const pendingBookings = bookings.filter((b) => (b.status || 'pending').toLowerCase() === 'pending');
   const disputedBookings = bookings.filter((b) => (b.status || '').toLowerCase() === 'disputed' || b.disputeStatus === 'open');
 
-  const totalVolume = completedBookings.reduce((sum, b) => sum + (parseFloat(b.price) || 0), 0);
-  const activeEscrowVolume = activeBookings.reduce((sum, b) => sum + (parseFloat(b.price) || 0), 0);
+  // Offer-flow bookings count the money that was actually paid; older bookings keep using their price.
+  const paidOrPrice = (b) => (isNegotiated(b) ? parseFloat(b.amountPaid) || 0 : parseFloat(b.price) || 0);
+  const totalVolume = completedBookings.reduce((sum, b) => sum + paidOrPrice(b), 0);
+  const activeEscrowVolume = activeBookings.reduce((sum, b) => sum + paidOrPrice(b), 0);
 
   const categoryCounts = {};
   bookings.forEach((b) => {

@@ -120,8 +120,13 @@ export async function createOrReuseInvoice({ db, xendit, config, bookingId, type
     currency: config.currency,
     description: `SkillSwap: ${booking.serviceTitle || 'Service'} (${label})`,
     invoice_duration: config.invoiceDuration,
-    success_redirect_url: `${config.publicBaseUrl}/payment/success`,
-    failure_redirect_url: `${config.publicBaseUrl}/payment/failed`,
+    // Without a public address (APK mode) no redirect is requested and Xendit shows its own result page.
+    ...(config.publicBaseUrl
+      ? {
+          success_redirect_url: `${config.publicBaseUrl}/payment/success`,
+          failure_redirect_url: `${config.publicBaseUrl}/payment/failed`,
+        }
+      : {}),
     ...(user.email ? { payer_email: user.email } : {}),
   });
 
@@ -151,7 +156,7 @@ export async function createOrReuseInvoice({ db, xendit, config, bookingId, type
 
 /* ───────────── confirm a payment with Xendit and apply it ───────────── */
 
-export async function syncInvoice({ db, xendit, bookingId, type, invoiceId, now = () => new Date() }) {
+export async function syncInvoice({ db, xendit, bookingId, type, invoiceId = null, now = () => new Date() }) {
   const ref = db.collection('bookings').doc(bookingId);
   const snap = await ref.get();
   if (!snap.exists) throw new HttpError(404, 'Booking not found.');

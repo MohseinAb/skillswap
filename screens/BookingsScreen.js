@@ -4,6 +4,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather, FontAwesome } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import { notify } from '../services/notify';
+import { getBookingStage, stageLabel } from '../services/paymentRules';
+import { ensureBookingChat } from '../services/bookingFlow';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -53,43 +56,13 @@ export default function BookingsScreen({ navigation }) {
     if (!auth.currentUser) return;
 
     try {
-      const qChats = query(
-        collection(db, 'chats'),
-        where('participants', 'array-contains', auth.currentUser.uid)
-      );
-      const snapshot = await getDocs(qChats);
-      let chatId = null;
-
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        if (data.participants && data.participants.includes(booking.freelancerId)) {
-          chatId = docSnap.id;
-        }
-      });
-
-      if (!chatId) {
-        const userDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
-        const clientName = userDoc.exists() ? (userDoc.data().fullName || userDoc.data().name) : 'Client';
-
-        const newChat = await addDoc(collection(db, 'chats'), {
-          participants: [auth.currentUser.uid, booking.freelancerId],
-          clientId: auth.currentUser.uid,
-          clientName: clientName,
-          freelancerId: booking.freelancerId,
-          freelancerName: booking.freelancerName || 'Freelancer',
-          projectTitle: booking.serviceTitle || booking.projectTitle || 'Service Booking',
-          lastMessage: 'Chat started from Bookings',
-          updatedAt: serverTimestamp()
-        });
-        chatId = newChat.id;
-      }
-
+      const chatId = await ensureBookingChat(booking);
       navigation.navigate('Chat', {
         chatId: chatId,
         otherUserName: booking.freelancerName || 'Freelancer'
       });
     } catch (error) {
-      Alert.alert('Error', 'Unable to open chat right now.');
+      notify('Error', 'Unable to open chat right now.');
     }
   };
 
@@ -134,6 +107,7 @@ export default function BookingsScreen({ navigation }) {
                 const progress = booking.progress || 0;
                 const isDisputed = (booking.status || '').toLowerCase() === 'disputed' || booking.disputeStatus === 'open';
                 const isReadyForReview = !isDisputed && (progress >= 80 || booking.status === 'completed');
+                const stage = getBookingStage(booking);
 
                 return (
                   <TouchableOpacity
@@ -166,7 +140,9 @@ export default function BookingsScreen({ navigation }) {
                             : booking.status === 'cancelled'
                             ? '✕ CANCELLED'
                             : booking.status === 'pending'
-                            ? '• AWAITING APPROVAL'
+                            ? `• ${stageLabel(stage, 'client').toUpperCase()}`
+                            : stage === 'delivered_locked'
+                            ? '🔒 FINAL WORK READY'
                             : isReadyForReview
                             ? '● REVIEW MILESTONE'
                             : `● IN PROGRESS (${progress}%)`}
@@ -242,6 +218,14 @@ export default function BookingsScreen({ navigation }) {
                             ? 'Open Dispute Chat'
                             : booking.status === 'completed'
                             ? (booking.rating ? 'View Review' : 'Rate & Review')
+                            : stage === 'offer_sent'
+                            ? 'Review offer'
+                            : stage === 'awaiting_downpayment'
+                            ? 'Pay downpayment'
+                            : stage === 'negotiating'
+                            ? 'View booking'
+                            : stage === 'delivered_locked'
+                            ? 'Pay and unlock'
                             : isReadyForReview
                             ? 'Review Work'
                             : 'Track Progress'}

@@ -66,7 +66,7 @@ export default function FreelancerMessagesScreen({ navigation }) {
                       <Text style={styles.msgTime}>Today</Text>
                     </View>
                     <Text style={[styles.msgPreview, { color: COLORS.text, fontWeight: '500' }]} numberOfLines={1}>{msg.lastMessage || "No messages yet."}</Text>
-                    <Text style={[styles.msgRole, { marginLeft: 0, marginTop: 4 }]}>Project: {msg.projectName || "General Inquiry"}</Text>
+                    <Text style={[styles.msgRole, { marginLeft: 0, marginTop: 4 }]}>Project: {msg.projectName || msg.projectTitle || "General Inquiry"}</Text>
                   </View>
                 </TouchableOpacity>
               ))

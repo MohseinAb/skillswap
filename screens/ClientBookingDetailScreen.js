@@ -7,6 +7,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather, FontAwesome } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import OfferSummary from '../components/OfferSummary';
+import DeliveryCard from '../components/DeliveryCard';
+import PayButton from '../components/PayButton';
+import { notify, confirmAction } from '../services/notify';
+import { isNegotiated, getBookingStage, stageLabel, describeOffer, peso } from '../services/paymentRules';
+import { acceptOffer, ensureBookingChat } from '../services/bookingFlow';
+import { createInvoice, openCheckout, prepareCheckoutWindow, usePaymentWatcher } from '../services/payments';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -32,6 +39,12 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
   const [groupMessage, setGroupMessage] = useState('');
   const [sendingGroupMsg, setSendingGroupMsg] = useState(false);
 
+  // Offer acceptance & payments
+  const [busyAction, setBusyAction] = useState(null); // 'accept' | 'downpayment' | 'final'
+  const { waitingFor, startWatching, stopWatching, checkNow } = usePaymentWatcher(bookingId, {
+    onPaid: (type) => notifyPaid(type),
+  });
+
   useEffect(() => {
     if (auth.currentUser) {
       getDoc(doc(db, 'users', auth.currentUser.uid)).then((snap) => {
@@ -51,6 +64,13 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
     return () => unsub();
   }, [bookingId]);
 
+  useEffect(() => {
+    if (waitingFor && booking?.payments?.[waitingFor]?.status === 'paid') {
+      stopWatching();
+      notifyPaid(waitingFor);
+    }
+  }, [booking, waitingFor]);
+
   const isAdmin = 
     (currentUserData?.role || currentUserData?.accountType || '').toLowerCase() === 'admin' ||
     auth.currentUser?.email?.toLowerCase() === 'admin@skillswap.ph';
@@ -58,39 +78,72 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
   const handleOpenChat = async () => {
     if (!auth.currentUser || !booking) return;
     try {
-      const qChats = query(
-        collection(db, 'chats'),
-        where('participants', 'array-contains', auth.currentUser.uid)
-      );
-      const snap = await getDocs(qChats);
-      let chatId = null;
-
-      snap.forEach((d) => {
-        if (d.data().participants?.includes(booking.freelancerId)) {
-          chatId = d.id;
-        }
-      });
-
-      if (!chatId) {
-        const newChat = await addDoc(collection(db, 'chats'), {
-          participants: [auth.currentUser.uid, booking.freelancerId],
-          clientId: auth.currentUser.uid,
-          clientName: booking.clientName || 'Client',
-          freelancerId: booking.freelancerId,
-          freelancerName: booking.freelancerName || 'Freelancer',
-          projectTitle: booking.serviceTitle || 'Service',
-          lastMessage: 'Opened chat from booking details',
-          updatedAt: serverTimestamp()
-        });
-        chatId = newChat.id;
-      }
-
+      const chatId = await ensureBookingChat(booking);
       navigation.navigate('Chat', {
         chatId,
         otherUserName: booking.freelancerName || 'Freelancer'
       });
     } catch (error) {
       console.error('Error navigating to chat:', error);
+      notify('Could not open the chat', 'Please try again in a moment.');
+    }
+  };
+
+  function notifyPaid(type) {
+    if (type === 'downpayment') {
+      notify('Downpayment received', 'Your project is now active and the freelancer can start working.');
+    } else {
+      notify('Payment received', 'Thank you! The final work is now unlocked.');
+    }
+  }
+
+  const handleAcceptTerms = async () => {
+    const ok = await confirmAction(
+      'Accept these terms?',
+      `${describeOffer(booking.offer)}\n\nYou can still ask questions in the chat, but the price and downpayment are locked in once you accept.`,
+      'Accept terms'
+    );
+    if (!ok) return;
+    setBusyAction('accept');
+    try {
+      const result = await acceptOffer(booking, booking.clientName);
+      notify(
+        'Terms accepted',
+        result.needsDownpayment ? 'Next, pay the downpayment to start the project.' : 'The project is now active.'
+      );
+    } catch (error) {
+      notify('Could not accept the offer', error.message || 'Please try again.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  // type: 'downpayment' | 'final'. The amount is decided by the server from the accepted offer.
+  const handlePay = async (type) => {
+    // Open the checkout tab inside the tap (browsers block pop-ups opened later), then point it at the invoice.
+    const checkoutWindow = prepareCheckoutWindow();
+    setBusyAction(type);
+    try {
+      const invoice = await createInvoice(bookingId, type);
+      if (invoice.alreadyPaid) {
+        if (checkoutWindow) checkoutWindow.close();
+        notify('Already paid', 'We already received this payment. Your booking will update in a moment.');
+        return;
+      }
+      await openCheckout(invoice.invoiceUrl, checkoutWindow);
+      startWatching(type);
+    } catch (error) {
+      if (checkoutWindow) checkoutWindow.close();
+      notify('Could not start the payment', error.message || 'Please try again.');
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleCheck = async (type) => {
+    const result = await checkNow(type);
+    if (!result.paid) {
+      notify('Not paid yet', result.error || 'We have not received this payment yet. Finish the checkout, then check again.');
     }
   };
 
@@ -183,9 +236,9 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
     setSubmitting(true);
 
     try {
+      // Negotiated bookings are completed by the final payment, never by the review.
       await updateDoc(doc(db, 'bookings', bookingId), {
-        status: 'completed',
-        progress: 100,
+        ...(isNegotiated(booking) ? {} : { status: 'completed', progress: 100 }),
         rating: rating,
         reviewText: reviewText.trim(),
         reviewedAt: serverTimestamp()
@@ -218,9 +271,9 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
         }
       }
 
-      Alert.alert('Thank You!', 'Your rating and review have been submitted.');
+      notify('Thank you!', 'Your rating and review have been submitted.');
     } catch (error) {
-      Alert.alert('Error', 'Could not submit review. Please try again.');
+      notify('Error', 'Could not submit review. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -235,6 +288,11 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
   }
 
   const progress = booking.progress || 0;
+  const negotiated = isNegotiated(booking);
+  const stage = getBookingStage(booking);
+  const paymentsPaused = stage === 'disputed';
+  // Negotiated bookings can only be reviewed once they are completed (paid).
+  const canReview = !negotiated || booking.status === 'completed';
   const isDisputed = (booking.status || '').toLowerCase() === 'disputed' || booking.disputeStatus === 'open' || (booking.disputeMessages && booking.disputeMessages.length > 0);
 
   return (
@@ -278,7 +336,7 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
               </View>
               <View style={[styles.statusPill, { borderColor: booking.status === 'disputed' ? '#FF4C4C' : COLORS.primary }]}>
                 <Text style={[styles.statusText, { color: booking.status === 'disputed' ? '#FF4C4C' : COLORS.primary }]}>
-                  {(booking.status || 'PENDING').toUpperCase()}
+                  {negotiated ? stageLabel(stage, 'client').toUpperCase() : (booking.status || 'PENDING').toUpperCase()}
                 </Text>
               </View>
             </View>
@@ -310,6 +368,81 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
               )}
             </View>
           </View>
+
+          {/* ============================================================== */}
+          {/* OFFER, PAYMENT & DELIVERY (bookings made with the new flow)     */}
+          {/* ============================================================== */}
+          {negotiated && (
+            <>
+              <Text style={styles.sectionTitle}>OFFER & PAYMENT</Text>
+
+              {booking.offer ? (
+                <OfferSummary booking={booking} viewer="client" />
+              ) : (
+                <View style={[styles.infoCard, { marginBottom: 12 }]}>
+                  <Text style={{ color: COLORS.text, fontSize: 15, fontWeight: '700', marginBottom: 6 }}>
+                    Waiting for a custom offer
+                  </Text>
+                  <Text style={{ color: COLORS.textSecondary, fontSize: 13, lineHeight: 19 }}>
+                    Chat with {booking.freelancerName || 'the freelancer'} to agree on the scope, timeline and price.
+                    They will then send a final offer for you to review.
+                  </Text>
+                </View>
+              )}
+
+              {!isAdmin && !paymentsPaused && stage === 'negotiating' && (
+                <TouchableOpacity
+                  style={[styles.btnDark, { paddingVertical: 14, borderRadius: 16, alignItems: 'center', marginBottom: 14, marginRight: 0 }]}
+                  onPress={handleOpenChat}
+                >
+                  <Text style={styles.btnDarkText}>Open chat</Text>
+                </TouchableOpacity>
+              )}
+
+              {!isAdmin && !paymentsPaused && stage === 'offer_sent' && (
+                <View style={{ flexDirection: 'row', marginBottom: 14 }}>
+                  <TouchableOpacity style={[styles.btnHalf, styles.btnDark]} onPress={handleOpenChat}>
+                    <Text style={styles.btnDarkText}>Discuss in chat</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.btnHalf, styles.btnPrimary]}
+                    onPress={handleAcceptTerms}
+                    disabled={busyAction === 'accept'}
+                  >
+                    {busyAction === 'accept' ? (
+                      <ActivityIndicator color={COLORS.onPrimary} />
+                    ) : (
+                      <Text style={styles.btnPrimaryText}>Accept terms</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              {!isAdmin && !paymentsPaused && stage === 'awaiting_downpayment' && (
+                <View style={{ marginBottom: 14 }}>
+                  <PayButton
+                    title={`Pay ${peso(booking.offer?.downpaymentAmount)} downpayment`}
+                    busy={busyAction === 'downpayment'}
+                    waiting={waitingFor === 'downpayment'}
+                    onPress={() => handlePay('downpayment')}
+                    onCheck={() => handleCheck('downpayment')}
+                  />
+                </View>
+              )}
+
+              {(booking.deliveryStatus === 'submitted' || booking.deliveryStatus === 'unlocked') && (
+                <DeliveryCard
+                  booking={booking}
+                  canPay={!paymentsPaused && !isAdmin}
+                  blockedMessage={isAdmin ? 'The client has not paid the remaining balance yet.' : 'Payments are paused while a dispute is open.'}
+                  payBusy={busyAction === 'final'}
+                  waiting={waitingFor === 'final'}
+                  onPayFinal={() => handlePay('final')}
+                  onCheck={() => handleCheck('final')}
+                />
+              )}
+            </>
+          )}
 
           {/* ============================================================== */}
           {/* 3-WAY DISPUTE GROUP CHAT (CLIENT + FREELANCER + ADMIN)         */}
@@ -493,7 +626,9 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
             </View>
           )}
 
-          {/* Rate & Review Section */}
+          {/* Rate & Review Section (negotiated bookings: after the project is completed and paid) */}
+          {canReview && (
+          <>
           <Text style={[styles.sectionTitle, { marginTop: 25 }]}>RATE & REVIEW FREELANCER</Text>
           <View style={styles.infoCard}>
             <Text style={{ color: COLORS.text, fontSize: 13, fontWeight: 'bold', marginBottom: 10, textAlign: 'center' }}>
@@ -530,11 +665,13 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
                 <ActivityIndicator color="#000" />
               ) : (
                 <Text style={styles.primaryButtonText}>
-                  {booking.rating ? 'Update Rating & Review' : 'Complete & Submit Review'}
+                  {booking.rating ? 'Update rating and review' : negotiated ? 'Submit review' : 'Complete & Submit Review'}
                 </Text>
               )}
             </TouchableOpacity>
           </View>
+          </>
+          )}
         </ScrollView>
 
         {/* Full-Resolution Image Lightbox Modal */}
