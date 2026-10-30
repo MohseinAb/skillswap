@@ -1,12 +1,14 @@
 import React, { useState } from 'react';
-import { Text, View, TextInput, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
+import { Text, View, TextInput, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COLORS, styles } from '../styles';
 
 import { auth, db } from '../firebaseConfig';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, sendEmailVerification, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { notify, confirmAction } from '../services/notify';
+import { checkAccountAccess, routeForRole, offerVerificationResend } from '../services/session';
 
 export default function LoginScreen({ navigation }) {
   const [email, setEmail] = useState('');
@@ -16,7 +18,7 @@ export default function LoginScreen({ navigation }) {
   const handleLogin = async () => {
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !password) {
-      Alert.alert('Missing Fields', 'Please enter your email and password.');
+      notify('Missing fields', 'Please enter your email and password.');
       return;
     }
 
@@ -45,24 +47,40 @@ export default function LoginScreen({ navigation }) {
       const userDoc = await getDoc(doc(db, 'users', uid));
       const userData = userDoc.exists() ? userDoc.data() : {};
 
-      if (userData.suspended) {
-        Alert.alert('Account Suspended', 'Your account has been suspended by an administrator.');
+      const user = userCredential.user;
+      const access = await checkAccountAccess({
+        userData,
+        email: cleanEmail,
+        reloadUser: () => user.reload(),
+        isEmailVerified: () => !!(auth.currentUser || user).emailVerified,
+      });
+
+      if (!access.allowed && access.reason === 'suspended') {
+        notify('Account suspended', 'Your account has been suspended by an administrator.');
+        await signOut(auth); // otherwise the app would reopen straight into this account next time
         setLoading(false);
         return;
       }
 
-      const role = (userData.role || userData.accountType || '').toLowerCase();
-
-      if (role === 'admin' || cleanEmail === 'admin@skillswap.ph') {
-        navigation.replace('AdminDashboard');
-      } else if (role === 'freelancer') {
-        navigation.replace('FreelancerTabs');
-      } else {
-        navigation.replace('ClientTabs');
+      if (!access.allowed) {
+        // New accounts must open the link we emailed them first. Offer to send it again,
+        // then sign out so nobody stays half logged in.
+        await offerVerificationResend({
+          user,
+          email: cleanEmail,
+          confirm: confirmAction,
+          notifyFn: notify,
+          sendVerification: sendEmailVerification,
+        });
+        await signOut(auth);
+        setLoading(false);
+        return;
       }
+
+      navigation.replace(routeForRole(access.role));
     } catch (error) {
       console.error('Login error:', error);
-      Alert.alert('Login Failed', 'Invalid email or password.');
+      notify('Login failed', 'Invalid email or password.');
     } finally {
       setLoading(false);
     }

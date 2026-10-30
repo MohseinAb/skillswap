@@ -1,5 +1,7 @@
+import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { getAuth, initializeAuth, getReactNativePersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -13,5 +15,19 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
+
+let authInstance;
+if (Platform.OS === "web") {
+  authInstance = getAuth(app); // the browser already remembers the login
+} else {
+  try {
+    authInstance = initializeAuth(app, {
+      persistence: getReactNativePersistence(AsyncStorage),
+    });
+  } catch (error) {
+    authInstance = getAuth(app); // already initialised (happens on fast refresh)
+  }
+}
+
+export const auth = authInstance;
 export const db = getFirestore(app);

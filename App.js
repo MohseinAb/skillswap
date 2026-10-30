@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { View, ActivityIndicator } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -6,6 +7,10 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { Feather } from '@expo/vector-icons';
 import { COLORS } from './styles';
 import { navigationRef, configureNotifications, useNotificationTapHandler, usePushRegistration } from './services/notifications';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { auth, db } from './firebaseConfig';
+import { resolveStartRoute } from './services/session';
 
 // --- Auth Screens ---
 import GetStartedScreen from './screens/GetStartedScreen';
@@ -111,13 +116,71 @@ function FreelancerTabNavigator() {
   );
 }
 
+// Works out where the app should open. Someone who is still signed in from last time goes straight
+// to their home screen; everyone else (or anyone who may no longer sign in) sees the welcome screen.
+// Returns null while it is still deciding.
+function useStartRoute() {
+  const [route, setRoute] = useState(null);
+
+  useEffect(() => {
+    let finished = false;
+    let unsubscribe = null;
+    const finish = (next) => {
+      if (!finished) {
+        finished = true;
+        setRoute(next);
+      }
+    };
+
+    // Only the first answer matters; after that the screens navigate by themselves (login, logout).
+    unsubscribe = onAuthStateChanged(
+      auth,
+      async (user) => {
+        if (unsubscribe) unsubscribe();
+        finish(
+          await resolveStartRoute({
+            user,
+            loadProfile: async (uid) => {
+              const snap = await getDoc(doc(db, 'users', uid));
+              return snap.exists() ? snap.data() : {};
+            },
+            reloadUser: () => user.reload(),
+            isEmailVerified: () => !!(auth.currentUser || user).emailVerified,
+            signOutUser: () => signOut(auth),
+          })
+        );
+      },
+      () => finish('GetStarted')
+    );
+
+    // Never leave someone staring at a spinner because of a slow connection.
+    const timer = setTimeout(() => finish('GetStarted'), 8000);
+    return () => {
+      finished = true;
+      if (unsubscribe) unsubscribe();
+      clearTimeout(timer);
+    };
+  }, []);
+
+  return route;
+}
+
 export default function App() {
   useNotificationTapHandler(); // open the right screen when a notification is tapped
+  const startRoute = useStartRoute();
+
+  if (startRoute === null) {
+    return (
+      <View style={{ flex: 1, backgroundColor: COLORS.bgBottom, justifyContent: 'center', alignItems: 'center' }}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+      </View>
+    );
+  }
 
   return (
     <SafeAreaProvider>
       <NavigationContainer ref={navigationRef}>
-        <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
+        <Stack.Navigator initialRouteName={startRoute} screenOptions={{ headerShown: false, animation: 'fade' }}>
           
           {/* Auth Stack */}
           <Stack.Screen name="GetStarted" component={GetStartedScreen} />

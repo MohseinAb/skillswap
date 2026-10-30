@@ -6,8 +6,10 @@ import * as ImagePicker from 'expo-image-picker';
 import { COLORS, styles } from '../styles';
 
 import { auth, db } from '../firebaseConfig';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
+import { createUserWithEmailAndPassword, sendEmailVerification, signOut } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
+import { notify } from '../services/notify';
+import { completeRegistration } from '../services/session';
 
 export default function RegFreelancerScreen({ navigation }) {
   const [fullName, setFullName] = useState('');
@@ -50,9 +52,21 @@ export default function RegFreelancerScreen({ navigation }) {
         idImage: idImageBase64, 
         role: "freelancer",
         createdAt: new Date(),
+        emailVerificationRequired: true,
       });
 
-      Alert.alert("Success", "Freelancer account created!");
+      // The account exists, but it can only be used once the emailed link has been opened.
+      const { emailSent } = await completeRegistration({
+        user,
+        sendVerification: sendEmailVerification,
+        signOutUser: () => signOut(auth),
+      });
+      notify(
+        emailSent ? 'Check your email' : 'Account created',
+        emailSent
+          ? `We sent a verification link to ${email}. Open it, then log in. Check your spam folder if you do not see it.`
+          : 'Your account was created, but the verification email could not be sent. Try to log in and choose "Send again".'
+      );
       navigation.navigate('Login');
 
     } catch (error) {
