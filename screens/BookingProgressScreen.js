@@ -15,6 +15,8 @@ import {
   isNegotiated, getBookingStage, stageLabel, normalizeUrl, peso, payoutSummary, PAYMENT_CONFIG,
 } from '../services/paymentRules';
 import { ensureBookingChat, submitFinalWork, getDelivery } from '../services/bookingFlow';
+import { notifyUsers, notifyDisputeParticipants } from '../services/notifications';
+import { messages as pushMessages } from '../services/pushMessages';
 
 import { auth, db } from '../firebaseConfig';
 import { doc, getDoc, onSnapshot, updateDoc, arrayUnion, serverTimestamp } from 'firebase/firestore';
@@ -135,6 +137,18 @@ export default function BookingProgressScreen({ route, navigation }) {
         updatedAt: serverTimestamp()
       });
 
+      // Push: tell the client about the update (and the freelancer too if an admin posted it).
+      notifyUsers(
+        [booking.clientId, booking.freelancerId],
+        pushMessages.progressUpdate({
+          freelancerName: booking.freelancerName,
+          serviceTitle: booking.serviceTitle || booking.projectTitle,
+          progress: finalProgress,
+          note: note.trim(),
+          bookingId,
+        })
+      );
+
       setNote('');
       setAttachmentLink('');
       setAttachmentImage(null);
@@ -224,6 +238,11 @@ export default function BookingProgressScreen({ route, navigation }) {
         disputeMessages: arrayUnion(msgObj),
         updatedAt: serverTimestamp()
       });
+
+      // Push: tell the other people in the dispute chat.
+      notifyDisputeParticipants(booking, (forRole) =>
+        pushMessages.disputeMessage({ senderName: baseName, senderRole: roleLabel, text: msgObj.text, bookingId, forRole })
+      );
 
       setGroupMessage('');
     } catch (error) {

@@ -4,6 +4,8 @@ import {
   writeBatch, runTransaction, arrayUnion, serverTimestamp,
 } from 'firebase/firestore';
 import { describeOffer, peso } from './paymentRules';
+import { notifyUser } from './notifications';
+import { messages } from './pushMessages';
 
 /*
   Booking lifecycle (all fields live on the bookings/{id} document):
@@ -159,6 +161,9 @@ export async function startNegotiation(service) {
   });
   await batch.commit();
 
+  // Push: tell the freelancer someone wants to book.
+  notifyUser(freelancerId, messages.bookingRequested({ clientName, serviceTitle, chatId: chatRef.id }));
+
   return { bookingId: bookingRef.id, chatId: chatRef.id, reused: false };
 }
 
@@ -201,6 +206,16 @@ export async function sendOffer(booking, offer, note, senderName) {
     try { id = await ensureBookingChat(booking); } catch (e) { id = null; }
   }
   await noticeSafely(id, `${senderName || 'The freelancer'} sent a custom offer. ${describeOffer(offer)}`);
+
+  // Push: tell the client there is an offer to review.
+  notifyUser(booking.clientId, messages.offerSent({
+    freelancerName: senderName,
+    serviceTitle: booking.serviceTitle || booking.projectTitle,
+    total: offer.total,
+    downpayment: offer.downpayment,
+    requiresDownpayment: !!offer.downpaymentRequired,
+    bookingId: booking.id,
+  }));
 }
 
 /* ───────────────────────── 3. Client accepts the terms ───────────────────────── */
@@ -240,6 +255,15 @@ export async function acceptOffer(booking, clientName) {
       ? `${clientName || 'The client'} accepted the offer. The project starts once the ${peso(result.downpayment)} downpayment is paid.`
       : `${clientName || 'The client'} accepted the offer. The project is now active.`
   );
+
+  // Push: tell the freelancer.
+  notifyUser(booking.freelancerId, messages.offerAccepted({
+    clientName,
+    serviceTitle: booking.serviceTitle || booking.projectTitle,
+    requiresDownpayment: result.needsDownpayment,
+    downpayment: result.downpayment,
+    bookingId: booking.id,
+  }));
   return result;
 }
 
@@ -285,6 +309,14 @@ export async function submitFinalWork(booking, urlInfo, note, senderName) {
       booking.chatId,
       `${senderName || 'The freelancer'} submitted the final work. It unlocks after the remaining ${peso(booking.offer && booking.offer.remainingBalance)} is paid.`
     );
+
+    // Push: the client now has a balance to pay.
+    notifyUser(booking.clientId, messages.finalWorkSubmitted({
+      freelancerName: senderName,
+      serviceTitle: booking.serviceTitle || booking.projectTitle,
+      remaining: booking.offer && booking.offer.remainingBalance,
+      bookingId: booking.id,
+    }));
   }
 }
 

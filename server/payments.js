@@ -78,7 +78,7 @@ export function assertCanInvoice(booking, type, uid) {
 
 /* ───────────── create (or reuse) an invoice ───────────── */
 
-export async function createOrReuseInvoice({ db, xendit, config, bookingId, type, user, now = () => new Date() }) {
+export async function createOrReuseInvoice({ db, xendit, config, bookingId, type, user, now = () => new Date(), notify = null }) {
   if (!TYPES.includes(type)) throw new HttpError(400, 'Unknown payment type.');
 
   const ref = db.collection('bookings').doc(bookingId);
@@ -100,7 +100,7 @@ export async function createOrReuseInvoice({ db, xendit, config, bookingId, type
     try {
       const existing = await xendit.getInvoice(current.invoiceId);
       if (PAID_STATUSES.has(existing.status)) {
-        await applyPaid({ db, bookingId, type, invoice: existing, now });
+        await applyPaid({ db, bookingId, type, invoice: existing, now, notify });
         return { alreadyPaid: true };
       }
       if (existing.status === 'PENDING') {
@@ -156,7 +156,7 @@ export async function createOrReuseInvoice({ db, xendit, config, bookingId, type
 
 /* ───────────── confirm a payment with Xendit and apply it ───────────── */
 
-export async function syncInvoice({ db, xendit, bookingId, type, invoiceId = null, now = () => new Date() }) {
+export async function syncInvoice({ db, xendit, bookingId, type, invoiceId = null, now = () => new Date(), notify = null }) {
   const ref = db.collection('bookings').doc(bookingId);
   const snap = await ref.get();
   if (!snap.exists) throw new HttpError(404, 'Booking not found.');
@@ -172,7 +172,7 @@ export async function syncInvoice({ db, xendit, bookingId, type, invoiceId = nul
 
   const invoice = await xendit.getInvoice(id);
   if (PAID_STATUSES.has(invoice.status)) {
-    await applyPaid({ db, bookingId, type, invoice, now });
+    await applyPaid({ db, bookingId, type, invoice, now, notify });
     return { paid: true, status: invoice.status };
   }
   if (invoice.status === 'EXPIRED') {
@@ -184,7 +184,9 @@ export async function syncInvoice({ db, xendit, bookingId, type, invoiceId = nul
   return { paid: false, status: invoice.status };
 }
 
-export async function applyPaid({ db, bookingId, type, invoice, now = () => new Date() }) {
+// `notify` (optional) is called once, after a payment is newly recorded, so the app can send a push
+// notification. It receives { type, bookingId, amount, booking } and must never be required to succeed.
+export async function applyPaid({ db, bookingId, type, invoice, now = () => new Date(), notify = null }) {
   const bookingRef = db.collection('bookings').doc(bookingId);
   const invoiceRef = db.collection('invoices').doc(invoice.id);
 
@@ -256,11 +258,29 @@ export async function applyPaid({ db, bookingId, type, invoice, now = () => new 
 
     tx.update(bookingRef, updates);
     tx.set(invoiceRef, { xenditStatus: invoice.status, status: 'paid', paidAt, paidAmount }, { merge: true });
-    return { applied: true, chatId: b.chatId || null, message };
+    return {
+      applied: true,
+      chatId: b.chatId || null,
+      message,
+      paidAmount,
+      party: {
+        clientId: b.clientId,
+        freelancerId: b.freelancerId,
+        clientName: b.clientName || null,
+        serviceTitle: b.serviceTitle || b.projectTitle || null,
+      },
+    };
   });
 
   if (outcome.applied && outcome.chatId) {
     await postSystemMessage(db, outcome.chatId, outcome.message, now);
+  }
+  if (outcome.applied && typeof notify === 'function') {
+    try {
+      await notify({ type, bookingId, amount: outcome.paidAmount, booking: outcome.party });
+    } catch (err) {
+      console.warn('Could not send the payment notification:', err.message);
+    }
   }
   return outcome;
 }
@@ -282,23 +302,23 @@ async function postSystemMessage(db, chatId, text, now) {
 /* ───────────── entry points used by the HTTP routes ───────────── */
 
 // "Has my payment gone through?": used by the app while it waits, by either party of the booking.
-export async function checkPayment({ db, xendit, bookingId, type, uid, now }) {
+export async function checkPayment({ db, xendit, bookingId, type, uid, now, notify = null }) {
   if (!TYPES.includes(type)) throw new HttpError(400, 'Unknown payment type.');
   const snap = await db.collection('bookings').doc(bookingId).get();
   if (!snap.exists) throw new HttpError(404, 'Booking not found.');
   const b = snap.data();
   if (uid !== b.clientId && uid !== b.freelancerId) throw new HttpError(403, 'You are not part of this booking.');
-  return syncInvoice({ db, xendit, bookingId, type, now });
+  return syncInvoice({ db, xendit, bookingId, type, now, notify });
 }
 
 // Xendit's "invoice paid" callback. The body only tells us WHICH invoice to look at; whether it
 // was really paid is decided by asking Xendit again inside syncInvoice().
-export async function handleInvoiceCallback({ db, xendit, payload, now }) {
+export async function handleInvoiceCallback({ db, xendit, payload, now, notify = null }) {
   const invoiceId = payload && payload.id;
   if (!invoiceId) throw new HttpError(400, 'Missing invoice id.');
   const ledger = await db.collection('invoices').doc(invoiceId).get();
   if (!ledger.exists) return { ignored: true };
   const { bookingId, type } = ledger.data();
-  const result = await syncInvoice({ db, xendit, bookingId, type, invoiceId, now });
+  const result = await syncInvoice({ db, xendit, bookingId, type, invoiceId, now, notify });
   return { ignored: false, ...result };
 }

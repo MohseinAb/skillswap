@@ -426,3 +426,41 @@ test('without a public address no redirect urls are sent to Xendit', async () =>
   assert.equal('failure_redirect_url' in sent, false);
   assert.equal(sent.amount, 2500);
 });
+
+test('a payment notification fires once per newly recorded payment, never breaks the payment', async () => {
+  const db = new FakeDb();
+  const x = makeXendit();
+  const calls = [];
+  const notify = async (info) => { calls.push(info); };
+  seed(db, {}, {});
+  db.docs.set('bookings/b1', { ...read(db, 'bookings/b1'), clientName: 'Abdul', serviceTitle: 'Logo design' });
+  const inv = await invoice(db, x, 'downpayment');
+
+  // not paid yet: no notification
+  await checkPayment({ db, xendit: x, bookingId: 'b1', type: 'downpayment', uid: 'client1', notify });
+  assert.equal(calls.length, 0);
+
+  x.pay(inv.invoiceId);
+  await Promise.all([
+    checkPayment({ db, xendit: x, bookingId: 'b1', type: 'downpayment', uid: 'client1', notify }),
+    checkPayment({ db, xendit: x, bookingId: 'b1', type: 'downpayment', uid: 'free1', notify }),
+    handleInvoiceCallback({ db, xendit: x, payload: { id: inv.invoiceId }, notify }),
+  ]);
+  assert.equal(calls.length, 1, 'concurrent confirmations must notify exactly once');
+  assert.deepEqual(
+    [calls[0].type, calls[0].bookingId, calls[0].amount, calls[0].booking.freelancerId, calls[0].booking.clientName, calls[0].booking.serviceTitle],
+    ['downpayment', 'b1', 2500, 'free1', 'Abdul', 'Logo design']
+  );
+
+  // already applied: still silent
+  await checkPayment({ db, xendit: x, bookingId: 'b1', type: 'downpayment', uid: 'client1', notify });
+  assert.equal(calls.length, 1);
+
+  // a failing notifier must not undo or fail the payment
+  db.docs.set('bookings/b1', { ...read(db, 'bookings/b1'), deliveryStatus: 'submitted' });
+  const fin = await invoice(db, x, 'final');
+  x.pay(fin.invoiceId);
+  const res = await checkPayment({ db, xendit: x, bookingId: 'b1', type: 'final', uid: 'client1', notify: async () => { throw new Error('push down'); } });
+  assert.equal(res.paid, true);
+  assert.equal(read(db, 'bookings/b1').status, 'completed');
+});

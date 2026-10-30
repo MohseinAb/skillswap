@@ -5,6 +5,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { COLORS } from './styles';
+import { navigationRef, configureNotifications, useNotificationTapHandler, usePushRegistration } from './services/notifications';
 
 // --- Auth Screens ---
 import GetStartedScreen from './screens/GetStartedScreen';
@@ -34,12 +35,16 @@ import ChatScreen from './screens/ChatScreen';
 
 import AdminDashboardScreen from './screens/AdminDashboardScreen';
 
+// How notifications look while the app is open (once, at startup).
+configureNotifications();
+
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
 function ClientTabNavigator() {
   const insets = useSafeAreaInsets();
   const bottomPadding = Math.max(insets.bottom, 20);
+  usePushRegistration(); // ask for permission and save this phone's push token after login
 
   return (
     <Tab.Navigator
@@ -74,6 +79,7 @@ function ClientTabNavigator() {
 function FreelancerTabNavigator() {
   const insets = useSafeAreaInsets();
   const bottomPadding = Math.max(insets.bottom, 20);
+  usePushRegistration(); // ask for permission and save this phone's push token after login
 
   return (
     <Tab.Navigator
@@ -106,9 +112,11 @@ function FreelancerTabNavigator() {
 }
 
 export default function App() {
+  useNotificationTapHandler(); // open the right screen when a notification is tapped
+
   return (
     <SafeAreaProvider>
-      <NavigationContainer>
+      <NavigationContainer ref={navigationRef}>
         <Stack.Navigator screenOptions={{ headerShown: false, animation: 'fade' }}>
           
           {/* Auth Stack */}

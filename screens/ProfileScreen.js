@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Text, View, TextInput, TouchableOpacity, ScrollView, 
-  Image, Alert, Modal, ActivityIndicator 
+  Image, Alert, Modal, ActivityIndicator, Linking 
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,6 +10,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { COLORS, styles } from '../styles';
 import { notify } from '../services/notify';
 import { validatePayoutForm, payoutSummary } from '../services/paymentRules';
+import { registerForPush, unregisterPush, getPushStatus } from '../services/notifications';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -21,6 +22,14 @@ import {
 
 export default function ProfileScreen({ navigation }) {
   const [userData, setUserData] = useState(null);
+
+  // Push notification status for this phone (refreshed whenever the screen is shown)
+  const [pushStatus, setPushStatus] = useState({ supported: true, granted: false, canAskAgain: true, registered: false });
+  const refreshPushStatus = () => getPushStatus().then(setPushStatus).catch(() => {});
+  useEffect(() => {
+    refreshPushStatus();
+    return navigation.addListener('focus', refreshPushStatus);
+  }, []);
   const [services, setServices] = useState([]);
 
   // Edit Account Info Modal State
@@ -103,6 +112,42 @@ export default function ProfileScreen({ navigation }) {
   const role = (userData?.role || userData?.accountType || '').toLowerCase();
   const isFreelancer = role === 'freelancer';
   const payoutLine = payoutSummary(userData?.paymentMethod);
+
+  const pushLabel = !pushStatus.supported
+    ? 'Only available in the mobile app'
+    : pushStatus.granted && pushStatus.registered
+    ? 'On for this phone'
+    : pushStatus.granted
+    ? 'Allowed, but not set up. Tap to retry.'
+    : pushStatus.canAskAgain
+    ? 'Off. Tap to turn on.'
+    : 'Blocked in phone settings. Tap to open them.';
+
+  const handlePushRow = async () => {
+    if (!pushStatus.supported) {
+      notify('Not available here', 'Push notifications work in the installed mobile app, not in the browser.');
+      return;
+    }
+    if (pushStatus.granted && pushStatus.registered) {
+      notify('Notifications are on', 'This phone gets alerts for messages, bookings, offers, payments and progress updates.');
+      return;
+    }
+    if (!pushStatus.granted && !pushStatus.canAskAgain) {
+      Linking.openSettings();
+      return;
+    }
+    const result = await registerForPush();
+    await refreshPushStatus();
+    if (result.status === 'granted') {
+      notify('Notifications are on', 'This phone will now get alerts.');
+    } else if (result.status === 'no-project-id') {
+      notify('This build cannot do push yet', 'The app has no EAS project id. Run "eas init", then rebuild the app.');
+    } else if (result.status === 'denied') {
+      notify('Permission needed', 'Allow notifications for SkillSwap to receive alerts.');
+    } else {
+      notify('Could not turn notifications on', result.error || 'Please try again.');
+    }
+  };
   const isAdmin = role === 'admin' || auth.currentUser?.email?.toLowerCase() === 'admin@skillswap.ph';
   const selectedService = services.find((s) => s.id === selectedServiceId) || services[0];
 
@@ -295,6 +340,7 @@ export default function ProfileScreen({ navigation }) {
 
   const handleLogout = async () => {
     try {
+      await unregisterPush(); // stop this phone receiving this account's notifications
       await signOut(auth);
       navigation.replace('Login');
     } catch (error) {
@@ -389,6 +435,19 @@ export default function ProfileScreen({ navigation }) {
               </TouchableOpacity>
             )}
             
+            <TouchableOpacity style={styles.listItem} onPress={handlePushRow}>
+              <View style={styles.listLeft}>
+                <Feather name="bell" size={18} color={COLORS.primary} />
+                <View>
+                  <Text style={styles.listText}>Push notifications</Text>
+                  <Text style={[styles.listText, { fontSize: 12, fontWeight: '500', marginTop: 2, color: pushStatus.granted && pushStatus.registered ? COLORS.textSecondary : COLORS.warning }]}>
+                    {pushLabel}
+                  </Text>
+                </View>
+              </View>
+              <Feather name="chevron-right" size={18} color={COLORS.textSecondary} />
+            </TouchableOpacity>
+
             {isFreelancer && (
               <TouchableOpacity style={styles.listItem} onPress={() => setShowPaymentModal(true)}>
                 <View style={styles.listLeft}>

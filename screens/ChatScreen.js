@@ -10,6 +10,8 @@ import { COLORS, styles } from '../styles';
 import OfferModal from '../components/OfferModal';
 import { getBookingStage, peso, payoutSummary, PAYMENT_CONFIG } from '../services/paymentRules';
 import { notify } from '../services/notify';
+import { setActiveChat, notifyUsers } from '../services/notifications';
+import { messages as pushMessages } from '../services/pushMessages';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -68,6 +70,12 @@ export default function ChatScreen({ route, navigation }) {
     };
   }, [chatId]);
 
+  // Tell the notification service which chat is open, so it does not buzz about messages you are reading.
+  useEffect(() => {
+    setActiveChat(chatId);
+    return () => setActiveChat(null);
+  }, [chatId]);
+
   // Live profile, so a payout method saved in Profile is picked up when you come back here.
   useEffect(() => {
     if (!auth.currentUser) return undefined;
@@ -114,6 +122,10 @@ export default function ChatScreen({ route, navigation }) {
         lastMessage: isAdmin ? `[ADMIN] ${cleanText}` : cleanText,
         updatedAt: serverTimestamp()
       });
+
+      // Push: tell everyone else in this chat.
+      const others = (chatData?.participants || []).filter((uid) => uid !== auth.currentUser.uid);
+      notifyUsers(others, pushMessages.chat({ senderName: isAdmin ? `${senderName} (Admin)` : senderName, text: cleanText, chatId }));
     } catch (error) {
       console.error('Error sending message:', error);
     }

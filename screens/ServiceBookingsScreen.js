@@ -11,6 +11,8 @@ import { COLORS, styles } from '../styles';
 import { notify, confirmAction } from '../services/notify';
 import { getBookingStage, stageLabel } from '../services/paymentRules';
 import { ensureBookingChat } from '../services/bookingFlow';
+import { notifyUser } from '../services/notifications';
+import { messages as pushMessages } from '../services/pushMessages';
 
 import { auth, db } from '../firebaseConfig';
 import { collection, query, where, onSnapshot, doc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -130,6 +132,16 @@ export default function ServiceBookingsScreen({ route, navigation }) {
         status: 'declined',
         updatedAt: serverTimestamp()
       });
+
+      // Push: tell the client.
+      const declined = bookings.find((b) => b.id === bookingId);
+      if (declined) {
+        notifyUser(declined.clientId, pushMessages.bookingDeclined({
+          freelancerName: declined.freelancerName,
+          serviceTitle: declined.serviceTitle || declined.projectTitle,
+          bookingId,
+        }));
+      }
     } catch (error) {
       notify('Error', 'Could not decline the booking. Please try again.');
     }

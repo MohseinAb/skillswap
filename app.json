@@ -14,8 +14,10 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#1B362A"
-      }
+      },
+      "googleServicesFile": "./google-services.json"
     },
+    "plugins": ["expo-notifications"],
     "web": {
       "favicon": "./assets/favicon.png"
     },
@@ -23,6 +25,7 @@
       "eas": {
         "projectId": "5c13269e-83bc-4d75-8996-365a7efb87da"
       }
-    }
+    },
+    "owner": "mohsein"
   }
 }

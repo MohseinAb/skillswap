@@ -14,6 +14,8 @@ import { notify, confirmAction } from '../services/notify';
 import { isNegotiated, getBookingStage, stageLabel, describeOffer, peso } from '../services/paymentRules';
 import { acceptOffer, ensureBookingChat } from '../services/bookingFlow';
 import { createInvoice, openCheckout, prepareCheckoutWindow, usePaymentWatcher } from '../services/payments';
+import { notifyUser, notifyDisputeParticipants } from '../services/notifications';
+import { messages as pushMessages } from '../services/pushMessages';
 
 import { auth, db } from '../firebaseConfig';
 import { 
@@ -185,6 +187,16 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
         createdAt: serverTimestamp()
       });
 
+      // Push: tell the freelancer and the admins.
+      notifyDisputeParticipants(booking, (forRole) =>
+        pushMessages.disputeOpened({
+          clientName: booking.clientName,
+          serviceTitle: booking.serviceTitle || booking.projectTitle,
+          bookingId,
+          forRole,
+        })
+      );
+
       setDisputeReason('');
       setDisputeModalVisible(false);
       Alert.alert('Dispute Opened', 'A 3-way Dispute Group Chat with the Freelancer and SkillSwap Admin is now active below!');
@@ -223,6 +235,11 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
         updatedAt: serverTimestamp()
       });
 
+      // Push: tell the other people in the dispute chat.
+      notifyDisputeParticipants(booking, (forRole) =>
+        pushMessages.disputeMessage({ senderName: baseName, senderRole: roleLabel, text: msgObj.text, bookingId, forRole })
+      );
+
       setGroupMessage('');
     } catch (error) {
       Alert.alert('Error', 'Failed to send message.');
@@ -243,6 +260,14 @@ export default function ClientBookingDetailScreen({ route, navigation }) {
         reviewText: reviewText.trim(),
         reviewedAt: serverTimestamp()
       });
+
+      // Push: tell the freelancer about the review.
+      notifyUser(booking.freelancerId, pushMessages.reviewReceived({
+        clientName: booking.clientName,
+        rating,
+        serviceTitle: booking.serviceTitle || booking.projectTitle,
+        bookingId,
+      }));
 
       if (booking.freelancerId) {
         const qRated = query(

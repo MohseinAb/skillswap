@@ -7,6 +7,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Feather } from '@expo/vector-icons';
 import { COLORS, styles } from '../styles';
+import { usePushRegistration, unregisterPush, notifyUsers } from '../services/notifications';
+import { messages as pushMessages } from '../services/pushMessages';
 import { isNegotiated } from '../services/paymentRules';
 
 import { auth, db } from '../firebaseConfig';
@@ -17,6 +19,9 @@ import {
 import { signOut } from 'firebase/auth';
 
 export default function AdminDashboardScreen({ navigation }) {
+  // Admins get push notifications too (new disputes, dispute chat messages).
+  usePushRegistration();
+
   const [activeTab, setActiveTab] = useState('Analytics');
   const [users, setUsers] = useState([]);
   const [bookings, setBookings] = useState([]);
@@ -224,6 +229,17 @@ export default function AdminDashboardScreen({ navigation }) {
         });
       }
 
+      // Push: tell the client and the freelancer how it was resolved.
+      const linked = bookings.find((b) => b.id === targetBookingId) || resolutionModal;
+      notifyUsers([linked.clientId, linked.freelancerId], (uid) =>
+        pushMessages.disputeResolved({
+          outcome: outcomeStatus,
+          serviceTitle: linked.serviceTitle || linked.projectTitle,
+          bookingId: targetBookingId,
+          forRole: uid === linked.freelancerId ? 'freelancer' : 'client',
+        })
+      );
+
       setAdminNote('');
       setResolutionModal(null);
       Alert.alert('Dispute Resolved', `The booking has been marked as ${outcomeStatus.toUpperCase()}.`);
@@ -233,6 +249,7 @@ export default function AdminDashboardScreen({ navigation }) {
   };
 
   const handleLogout = async () => {
+    await unregisterPush();
     await signOut(auth);
     navigation.replace('Login');
   };

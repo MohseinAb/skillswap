@@ -7,6 +7,8 @@ import { COLORS, styles } from '../styles';
 import { notify, confirmAction } from '../services/notify';
 import { isNegotiated, getBookingStage, stageLabel, payoutSummary } from '../services/paymentRules';
 import { ensureBookingChat } from '../services/bookingFlow';
+import { notifyUser } from '../services/notifications';
+import { messages as pushMessages } from '../services/pushMessages';
 
 import { auth, db } from '../firebaseConfig';
 import { collection, query, where, onSnapshot, doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
@@ -81,6 +83,16 @@ export default function FreelancerHomeScreen({ navigation }) {
         status: 'declined',
         updatedAt: serverTimestamp()
       });
+
+      // Push: tell the client.
+      const declined = pendingRequests.find((b) => b.id === reqId);
+      if (declined) {
+        notifyUser(declined.clientId, pushMessages.bookingDeclined({
+          freelancerName: declined.freelancerName,
+          serviceTitle: declined.serviceTitle || declined.projectTitle,
+          bookingId: reqId,
+        }));
+      }
     } catch (error) {
       console.error('Error declining project:', error);
       notify('Error', 'Could not decline the booking. Please try again.');
@@ -177,7 +189,7 @@ export default function FreelancerHomeScreen({ navigation }) {
               <View style={{ backgroundColor: 'rgba(0,0,0,0.1)', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, marginTop: 20, flexDirection: 'row', alignItems: 'center' }}>
                 <Feather name="clock" size={14} color="#000" style={{ marginRight: 8 }} />
                 <Text style={{ color: '#000', fontSize: 13, fontWeight: '600' }}>
-                  Pending: ₱ {pendingEscrow.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  Pending Escrow: ₱ {pendingEscrow.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </Text>
               </View>
             </View>

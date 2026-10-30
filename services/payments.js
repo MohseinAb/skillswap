@@ -5,6 +5,8 @@ import { PAYMENT_CONFIG } from './paymentRules';
 import { createOrReuseInvoice, checkPayment } from './paymentCore';
 import { createDirectXenditClient } from './xenditDirect';
 import { adminLikeDb } from './firestoreAdapter';
+import { notifyUser } from './notifications';
+import { messages } from './pushMessages';
 
 // Where the payments server (the /server folder) is running.
 //  - Same computer as the Expo web preview:  http://localhost:4000
@@ -66,6 +68,9 @@ function direct() {
       xendit: createDirectXenditClient(DIRECT_KEY),
       // No public address in APK mode, so no redirect is requested: Xendit shows its own result page.
       config: { currency: PAYMENT_CONFIG.CURRENCY, minPayment: PAYMENT_CONFIG.MIN_PAYMENT, invoiceDuration: 86400, publicBaseUrl: '' },
+      // Tell the freelancer the moment a payment is recorded.
+      notify: ({ type, bookingId, amount, booking }) =>
+        notifyUser(booking.freelancerId, messages.paymentReceived({ clientName: booking.clientName, serviceTitle: booking.serviceTitle, type, amount, bookingId })),
     };
   }
   return directContext;
